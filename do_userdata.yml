@@ -20,5 +20,5 @@ runcmd:
   - echo $HOSTNAME
   - export PUBLIC_IPV4=$(curl -s http://169.254.169.254/metadata/v1/interfaces/public/0/ipv4/address)
   - echo $PUBLIC_IPV4
-  - sed -i -e '/^Port/s/^.*$/Port 2222/' etc/ssh/sshd_config
-  - restart ssh
+  - sed -i -e '/^#Port/s/^.*$/Port 2222/' /etc/ssh/sshd_config
+  - service sshd restart

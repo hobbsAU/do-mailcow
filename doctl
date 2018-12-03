@@ -14,6 +14,49 @@ if [[ ! ${#DIGITALOCEAN_ACCESS_TOKEN} == 64 ]]; then
   done
 fi
 
+#Build docker-machine parameters
+if [ ! -z "$DIGITALOCEAN_ACCESS_TOKEN" ]; then
+DM_PARMS+=(--digitalocean-access-token $DIGITALOCEAN_ACCESS_TOKEN)
+fi
+
+if [ ! -z "$DIGITALOCEAN_SSH_KEY_FINGERPRINT" ]; then
+DM_PARMS+=(--digitalocean-ssh-key-fingerprint $DIGITALOCEAN_SSH_KEY_FINGERPRINT)
+fi
+
+if [ ! -z "$DIGITALOCEAN_IMAGE" ]; then
+DM_PARMS+=(--digitalocean-image $DIGITALOCEAN_IMAGE)
+fi
+
+if [ ! -z "$DIGITALOCEAN_REGION" ]; then
+DM_PARMS+=(--digitalocean-region $DIGITALOCEAN_REGION)
+fi
+
+if [ ! -z "$DIGITALOCEAN_SIZE" ]; then
+DM_PARMS+=(--digitalocean-size $DIGITALOCEAN_SIZE)
+fi
+
+if [ ! -z "$DIGITALOCEAN_USERDATA" ]; then
+DM_PARMS+=(--digitalocean-userdata $DIGITALOCEAN_USERDATA)
+fi
+
+if [ ! -z "$DIGITALOCEAN_SSH_KEY_PATH" ]; then
+DM_PARMS+=(--digitalocean-ssh-key-path $DIGITALOCEAN_USERDATA)
+fi
+
+if [ ! -z "$DIGITALOCEAN_SSH_PORT" ]; then
+DM_PARMS+=(--digitalocean-ssh-port $DIGITALOCEAN_SSH_PORT)
+fi
+
+if [ ! -z "$DIGITALOCEAN_MONITORING" ]; then
+DM_PARMS+=(--digitalocean-monitoring=$DIGITALOCEAN_MONITORING)
+fi
+
+if [ ! -z "$DIGITALOCEAN_HOSTNAME" ]; then
+DM_PARMS+=($DIGITALOCEAN_HOSTNAME)
+fi
+
+echo "$DM_PARMS"
+echo "${DM_PARMS[@]}"
 DOCKER_MACHINE=/usr/bin/docker-machine
 
 # ----------------------------------
@@ -25,8 +68,8 @@ pause(){
 
 machine_create(){
 	echo "Creating Docker Machine.."
-        $DOCKER_MACHINE create --driver digitalocean --digitalocean-access-token $DIGITALOCEAN_ACCESS_TOKEN --digitalocean-ssh-key-fingerprint $DIGITALOCEAN_SSH_KEY_FINGERPRINT --digitalocean-image $DIGITALOCEAN_IMAGE --digitalocean-region $DIGITALOCEAN_REGION --digitalocean-size $DIGITALOCEAN_SIZE --digitalocean-ssh-key-path $DIGITALOCEAN_SSH_KEY_PATH --digitalocean-monitoring $DIGITALOCEAN_HOSTNAME
-        #$DOCKER_MACHINE create --driver digitalocean --digitalocean-access-token $DIGITALOCEAN_ACCESS_TOKEN --digitalocean-ssh-key-fingerprint $DIGITALOCEAN_SSH_KEY_FINGERPRINT --digitalocean-image $DIGITALOCEAN_IMAGE --digitalocean-region $DIGITALOCEAN_REGION --digitalocean-size $DIGITALOCEAN_SIZE --digitalocean-userdata $DIGITALOCEAN_USERDATA --digitalocean-ssh-key-path $DIGITALOCEAN_SSH_KEY_PATH --digitalocean-monitoring $DIGITALOCEAN_HOSTNAME
+	eval "$DOCKER_MACHINE create --driver digitalocean ${DM_PARMS[@]}"
+ #       $DOCKER_MACHINE create --driver digitalocean --digitalocean-access-token $DIGITALOCEAN_ACCESS_TOKEN --digitalocean-ssh-key-fingerprint $DIGITALOCEAN_SSH_KEY_FINGERPRINT --digitalocean-image $DIGITALOCEAN_IMAGE --digitalocean-region $DIGITALOCEAN_REGION --digitalocean-size $DIGITALOCEAN_SIZE --digitalocean-userdata $DIGITALOCEAN_USERDATA --digitalocean-ssh-key-path $DIGITALOCEAN_SSH_KEY_PATH --digitalocean-ssh-port $DIGITALOCEAN_SSH_PORT --digitalocean-monitoring $DIGITALOCEAN_HOSTNAME
         #$DOCKER_MACHINE create --driver digitalocean --digitalocean-access-token $DIGITALOCEAN_ACCESS_TOKEN --digitalocean-ssh-key-fingerprint $DIGITALOCEAN_SSH_KEY_FINGERPRINT --digitalocean-image $DIGITALOCEAN_IMAGE --digitalocean-region $DIGITALOCEAN_REGION --digitalocean-size $DIGITALOCEAN_SIZE --digitalocean-backups $DIGITALOCEAN_BACKUPS --digitalocean-monitoring $DIGITALOCEAN_MONITORING --digitalocean-userdata $DIGITALOCEAN_USERDATA $DIGITALOCEAN_HOSTNAME
         pause
 }
@@ -50,7 +93,7 @@ machine_ip(){
 
 # function to display menus
 show_menus() {
-	clear
+#	clear
 	echo "~~~~~~~~~~~~~~~~~~~~~"	
 	echo " M A I N - M E N U"
 	echo "~~~~~~~~~~~~~~~~~~~~~"
@@ -87,7 +130,6 @@ trap '' SIGINT SIGQUIT SIGTSTP
 # ------------------------------------
 while true
 do
- 
 	show_menus
 	read_options
 done
