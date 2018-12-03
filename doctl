@@ -102,6 +102,23 @@ machine_ip(){
 	pause
 }
 
+machine_subcommand() {
+        local subcommand="$1"
+        case $subcommand in
+                active) $DM_BIN active ;;
+                config) $DM_BIN config $DIGITALOCEAN_HOSTNAME ;;
+                env) $DM_BIN env $DIGITALOCEAN_HOSTNAME ;;
+                env) $DM_BIN env ;;
+                4) mailcow_install ;;
+                5) mailcow_start ;;
+                0) exit 0;;
+                *) echo -e "${RED}Error...${STD}" && sleep 1
+        esac
+
+
+}
+
+
 #Install Mailcow
 mailcow_install(){
 	 $DM_BIN ssh $DIGITALOCEAN_HOSTNAME "
@@ -117,34 +134,95 @@ mailcow_start(){
 		cd /opt/mailcow-dockerized/; pwd; ls -al; docker-compose pull; docker-compose up -d"
 }
 
-# function to display menus
-show_menus() {
-#	clear
-	echo "~~~~~~~~~~~~~~~~~~~~~"	
-	echo " M A I N - M E N U"
-	echo "~~~~~~~~~~~~~~~~~~~~~"
-	echo "1. Provision DigitalOcean Mailcow"
-	echo "2. List Docker Machines"
-	echo "3. Droplet Public IP"
-	echo "4. Install Mailcow"
-	echo "5. Start Mailcow"
-	echo "0. Exit"
+
+# Function to display menu
+show_menu_machine() {
+	clear
+	echo "~~~~~~~~~~~~~~~~~~~~~~~~~"	
+	echo " M A C H I N E - M E N U"
+	echo "~~~~~~~~~~~~~~~~~~~~~~~~~"
+	echo "1.  upgrade   - Upgrade a machine to the latest version of Docker"
+	echo "2.  config    - Print the connection config for machine"
+	echo "3.  inspect   - Inspect information about a machine"
+	echo "4.  ls        - List machines"
+	echo "5.  restart   - Restart a machine"
+	echo "6.  rm        - Remove a machine"
+	echo "7.  ssh       - Log into or run a command on a machine with SSH."
+	echo "8.  start     - Start a machine"
+	echo "9.  status    - Get the status of a machine"
+	echo "10. stop      - Stop a machine"
+	echo "11. active    - Print which machine is active"
+	echo "12. version   - Show the Docker Machine version or a machine docker version"
+	echo "0.  Exit"
+}
+
+read_menu_machine_options(){
+	local choice
+	if [ -z "$DIGITALOCEAN_HOSTNAME" ]; then
+		while [ -z "$DIGITALOCEAN_HOSTNAME" ]; do
+        		$DM_BIN ls
+    			read -ep "Name: " DIGITALOCEAN_HOSTNAME
+  		done
+	fi
+	echo ""
+	read -p "Enter choice [ 0 - 11 ] " choice
+	case $choice in
+		1) $DM_BIN upgrade $DIGITALOCEAN_HOSTNAME; pause ;;
+		2) $DM_BIN config $DIGITALOCEAN_HOSTNAME; pause ;;
+		3) $DM_BIN inspect $DIGITALOCEAN_HOSTNAME; pause ;;
+		4) $DM_BIN ls; pause ;;
+		5) $DM_BIN restart $DIGITALOCEAN_HOSTNAME; pause ;;
+		6) $DM_BIN rm $DIGITALOCEAN_HOSTNAME; pause ;;
+		7) $DM_BIN ssh $DIGITALOCEAN_HOSTNAME; pause ;;
+		8) $DM_BIN start $DIGITALOCEAN_HOSTNAME; pause ;;
+		9) $DM_BIN status $DIGITALOCEAN_HOSTNAME; pause ;;
+		10) $DM_BIN stop $DIGITALOCEAN_HOSTNAME; pause ;;
+		11) $DM_BIN active; pause ;;
+		12) $DM_BIN version; pause ;;
+		0) return 1;;
+		*) echo -e "${RED}Error...${STD}" && sleep 1
+	esac
+}
+
+machine_subcommands () {
+local loop_exit=0
+while [ $loop_exit -eq 0 ]
+do
+        show_menu_machine
+        read_menu_machine_options
+	loop_exit=$?
+done
 }
 
 show_help() {
 echo "Usage: "
 }
 
+
+# Function to display main menu
+show_menu_main() {
+	clear
+	echo "~~~~~~~~~~~~~~~~~~~~~"	
+	echo " M A I N - M E N U"
+	echo "~~~~~~~~~~~~~~~~~~~~~"
+	echo "1. Provision DigitalOcean Mailcow"
+	echo "2. Docker Machine Subcommands"
+	echo "3. Droplet Public IP"
+	echo "4. Install Mailcow"
+	echo "5. Start Mailcow"
+	echo "0. Exit"
+}
+
 # read input from the keyboard and take a action
 # invoke the one() when the user select 1 from the menu option.
 # invoke the two() when the user select 2 from the menu option.
 # Exit when user the user select 3 form the menu option.
-read_options(){
+read_menu_main_options(){
 	local choice
-	read -p "Enter choice [ 0 - 5] " choice
+	read -p "Enter choice [ 0 - 5 ] " choice
 	case $choice in
 		1) machine_create ;;
-		2) machine_list ;;
+		2) machine_subcommands ;;
 		3) machine_ip ;;
 		4) mailcow_install ;;
 		5) mailcow_start ;;
@@ -178,6 +256,6 @@ done
 
 while true
 do
-	show_menus
-	read_options
+	show_menu_main
+	read_menu_main_options
 done
