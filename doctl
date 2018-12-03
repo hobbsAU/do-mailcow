@@ -4,13 +4,30 @@
 ## ----------------------------------
 # Section: Define variables
 # ----------------------------------
-source ./doenv
+source ./env.conf
+OPTIND=1
+DEBUG=0
+DM_BIN=/usr/bin/docker-machine
 
-set |grep DIGITALOCEAN
+# ----------------------------------
+#  Section: User defined functions
+# ----------------------------------
+pause(){
+  read -p "Press [Enter] key to continue..." fackEnterKey
+}
 
+machine_create(){
+local 	DM_PARMS=""
+
+#Must have access token and hostname	
 if [[ ! ${#DIGITALOCEAN_ACCESS_TOKEN} == 64 ]]; then
   while [[ ! ${#DIGITALOCEAN_ACCESS_TOKEN} == 64 ]]; do
     read -ep "DigitalOcean API Token (must be generated via DigitalOcean control panel): " DIGITALOCEAN_ACCESS_TOKEN
+  done
+fi
+if [ -z "$DIGITALOCEAN_HOSTNAME" ]; then
+  while [ -z "$DIGITALOCEAN_HOSTNAME" ]; do
+    read -ep "DigitalOcean hostname: " DIGITALOCEAN_HOSTNAME
   done
 fi
 
@@ -55,40 +72,49 @@ if [ ! -z "$DIGITALOCEAN_HOSTNAME" ]; then
 DM_PARMS+=($DIGITALOCEAN_HOSTNAME)
 fi
 
-echo "$DM_PARMS"
-echo "${DM_PARMS[@]}"
-DOCKER_MACHINE=/usr/bin/docker-machine
+	if [ $DEBUG -eq "1" ]; then
+		echo "${DM_PARMS[@]}";
+		eval "printenv |grep DIGITAL";
+	fi
 
-# ----------------------------------
-#  Section: User defined functions
-# ----------------------------------
-pause(){
-  read -p "Press [Enter] key to continue..." fackEnterKey
-}
 
-machine_create(){
 	echo "Creating Docker Machine.."
-	eval "$DOCKER_MACHINE create --driver digitalocean ${DM_PARMS[@]}"
- #       $DOCKER_MACHINE create --driver digitalocean --digitalocean-access-token $DIGITALOCEAN_ACCESS_TOKEN --digitalocean-ssh-key-fingerprint $DIGITALOCEAN_SSH_KEY_FINGERPRINT --digitalocean-image $DIGITALOCEAN_IMAGE --digitalocean-region $DIGITALOCEAN_REGION --digitalocean-size $DIGITALOCEAN_SIZE --digitalocean-userdata $DIGITALOCEAN_USERDATA --digitalocean-ssh-key-path $DIGITALOCEAN_SSH_KEY_PATH --digitalocean-ssh-port $DIGITALOCEAN_SSH_PORT --digitalocean-monitoring $DIGITALOCEAN_HOSTNAME
-        #$DOCKER_MACHINE create --driver digitalocean --digitalocean-access-token $DIGITALOCEAN_ACCESS_TOKEN --digitalocean-ssh-key-fingerprint $DIGITALOCEAN_SSH_KEY_FINGERPRINT --digitalocean-image $DIGITALOCEAN_IMAGE --digitalocean-region $DIGITALOCEAN_REGION --digitalocean-size $DIGITALOCEAN_SIZE --digitalocean-backups $DIGITALOCEAN_BACKUPS --digitalocean-monitoring $DIGITALOCEAN_MONITORING --digitalocean-userdata $DIGITALOCEAN_USERDATA $DIGITALOCEAN_HOSTNAME
+	eval "$DM_BIN create --driver digitalocean ${DM_PARMS[@]}"
         pause
 }
  
 # List docker-machines
 machine_list(){
 	echo "Listing Docker Machines.."
-        $DOCKER_MACHINE ls
+        $DM_BIN ls
 	pause
 }
  
 # List docker-machines
 machine_ip(){
-	echo "Listing Docker Machines.."
-        $DOCKER_MACHINE ls
-	echo ""
-	read -p "Enter machine name: " input
-        $DOCKER_MACHINE ip $input
+	if [ -z "$DIGITALOCEAN_HOSTNAME" ]; then
+		while [ -z "$DIGITALOCEAN_HOSTNAME" ]; do
+        		$DM_BIN ls
+    			read -ep "IP for hostname: " DIGITALOCEAN_HOSTNAME
+  		done
+	fi
+        $DM_BIN ip $DIGITALOCEAN_HOSTNAME
 	pause
+}
+
+#Install Mailcow
+mailcow_install(){
+	 $DM_BIN ssh $DIGITALOCEAN_HOSTNAME "
+		cd /opt;
+		git clone https://github.com/mailcow/mailcow-dockerized; 
+		cd mailcow-dockerized;
+		MAILCOW_HOSTNAME=$DIGITALOCEAN_HOSTNAME MAILCOW_TZ=$MAILCOW_TZ ./generate_config.sh;"
+}
+
+
+mailcow_start(){
+	 $DM_BIN ssh $DIGITALOCEAN_HOSTNAME "
+		cd /opt/mailcow-dockerized/; pwd; ls -al; docker-compose pull; docker-compose up -d"
 }
 
 # function to display menus
@@ -98,36 +124,58 @@ show_menus() {
 	echo " M A I N - M E N U"
 	echo "~~~~~~~~~~~~~~~~~~~~~"
 	echo "1. Provision DigitalOcean Mailcow"
-	echo "2. List Machines"
-	echo "3. Machines IP"
+	echo "2. List Docker Machines"
+	echo "3. Droplet Public IP"
+	echo "4. Install Mailcow"
+	echo "5. Start Mailcow"
 	echo "0. Exit"
 }
+
+show_help() {
+echo "Usage: "
+}
+
 # read input from the keyboard and take a action
 # invoke the one() when the user select 1 from the menu option.
 # invoke the two() when the user select 2 from the menu option.
 # Exit when user the user select 3 form the menu option.
 read_options(){
 	local choice
-	read -p "Enter choice [ 1 - 3] " choice
+	read -p "Enter choice [ 0 - 5] " choice
 	case $choice in
 		1) machine_create ;;
 		2) machine_list ;;
-		3) 
-		   machine_ip
-		   ;;
+		3) machine_ip ;;
+		4) mailcow_install ;;
+		5) mailcow_start ;;
 		0) exit 0;;
 		*) echo -e "${RED}Error...${STD}" && sleep 1
 	esac
 }
+
+
  
 # ----------------------------------------------
-# Step #3: Trap CTRL+C, CTRL+Z and quit singles
+# Section: Trap CTRL+C, CTRL+Z and quit singles
 # ----------------------------------------------
 trap '' SIGINT SIGQUIT SIGTSTP
  
 # -----------------------------------
-# Step #4: Main logic - infinite loop
+# Section: Main logic - infinite loop
 # ------------------------------------
+
+while getopts "hd" opt; do
+    case "$opt" in
+    h|\?)
+        show_help
+        exit 0
+        ;;
+    d)  DEBUG=1
+        ;;
+	esac
+done
+
+
 while true
 do
 	show_menus
