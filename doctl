@@ -1,0 +1,93 @@
+#!/bin/bash
+# A menu driven shell script to provision mailcow on DigitalOcean
+
+## ----------------------------------
+# Section: Define variables
+# ----------------------------------
+source ./doenv
+
+set |grep DIGITALOCEAN
+
+if [[ ! ${#DIGITALOCEAN_ACCESS_TOKEN} == 64 ]]; then
+  while [[ ! ${#DIGITALOCEAN_ACCESS_TOKEN} == 64 ]]; do
+    read -ep "DigitalOcean API Token (must be generated via DigitalOcean control panel): " DIGITALOCEAN_ACCESS_TOKEN
+  done
+fi
+
+DOCKER_MACHINE=/usr/bin/docker-machine
+
+# ----------------------------------
+#  Section: User defined functions
+# ----------------------------------
+pause(){
+  read -p "Press [Enter] key to continue..." fackEnterKey
+}
+
+machine_create(){
+	echo "Creating Docker Machine.."
+        $DOCKER_MACHINE create --driver digitalocean --digitalocean-access-token $DIGITALOCEAN_ACCESS_TOKEN --digitalocean-ssh-key-fingerprint $DIGITALOCEAN_SSH_KEY_FINGERPRINT --digitalocean-image $DIGITALOCEAN_IMAGE --digitalocean-region $DIGITALOCEAN_REGION --digitalocean-size $DIGITALOCEAN_SIZE --digitalocean-ssh-key-path $DIGITALOCEAN_SSH_KEY_PATH --digitalocean-monitoring $DIGITALOCEAN_HOSTNAME
+        #$DOCKER_MACHINE create --driver digitalocean --digitalocean-access-token $DIGITALOCEAN_ACCESS_TOKEN --digitalocean-ssh-key-fingerprint $DIGITALOCEAN_SSH_KEY_FINGERPRINT --digitalocean-image $DIGITALOCEAN_IMAGE --digitalocean-region $DIGITALOCEAN_REGION --digitalocean-size $DIGITALOCEAN_SIZE --digitalocean-userdata $DIGITALOCEAN_USERDATA --digitalocean-ssh-key-path $DIGITALOCEAN_SSH_KEY_PATH --digitalocean-monitoring $DIGITALOCEAN_HOSTNAME
+        #$DOCKER_MACHINE create --driver digitalocean --digitalocean-access-token $DIGITALOCEAN_ACCESS_TOKEN --digitalocean-ssh-key-fingerprint $DIGITALOCEAN_SSH_KEY_FINGERPRINT --digitalocean-image $DIGITALOCEAN_IMAGE --digitalocean-region $DIGITALOCEAN_REGION --digitalocean-size $DIGITALOCEAN_SIZE --digitalocean-backups $DIGITALOCEAN_BACKUPS --digitalocean-monitoring $DIGITALOCEAN_MONITORING --digitalocean-userdata $DIGITALOCEAN_USERDATA $DIGITALOCEAN_HOSTNAME
+        pause
+}
+ 
+# List docker-machines
+machine_list(){
+	echo "Listing Docker Machines.."
+        $DOCKER_MACHINE ls
+	pause
+}
+ 
+# List docker-machines
+machine_ip(){
+	echo "Listing Docker Machines.."
+        $DOCKER_MACHINE ls
+	echo ""
+	read -p "Enter machine name: " input
+        $DOCKER_MACHINE ip $input
+	pause
+}
+
+# function to display menus
+show_menus() {
+	clear
+	echo "~~~~~~~~~~~~~~~~~~~~~"	
+	echo " M A I N - M E N U"
+	echo "~~~~~~~~~~~~~~~~~~~~~"
+	echo "1. Provision DigitalOcean Mailcow"
+	echo "2. List Machines"
+	echo "3. Machines IP"
+	echo "0. Exit"
+}
+# read input from the keyboard and take a action
+# invoke the one() when the user select 1 from the menu option.
+# invoke the two() when the user select 2 from the menu option.
+# Exit when user the user select 3 form the menu option.
+read_options(){
+	local choice
+	read -p "Enter choice [ 1 - 3] " choice
+	case $choice in
+		1) machine_create ;;
+		2) machine_list ;;
+		3) 
+		   machine_ip
+		   ;;
+		0) exit 0;;
+		*) echo -e "${RED}Error...${STD}" && sleep 1
+	esac
+}
+ 
+# ----------------------------------------------
+# Step #3: Trap CTRL+C, CTRL+Z and quit singles
+# ----------------------------------------------
+trap '' SIGINT SIGQUIT SIGTSTP
+ 
+# -----------------------------------
+# Step #4: Main logic - infinite loop
+# ------------------------------------
+while true
+do
+ 
+	show_menus
+	read_options
+done
