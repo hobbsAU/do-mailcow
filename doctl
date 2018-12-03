@@ -4,14 +4,33 @@
 ## ----------------------------------
 # Section: Define variables
 # ----------------------------------
-source ./env.conf
-OPTIND=1
 DEBUG=0
 DM_BIN=/usr/bin/docker-machine
+ENV_CONF='env.conf'
 
 # ----------------------------------
 #  Section: User defined functions
 # ----------------------------------
+read_env_conf() {
+if [ -f ${ENV_CONF} ]; then
+    echo "Reading user config...." >&2
+
+    # check if the file contains something we don't want
+    CONFIG_SYNTAX="(^\s*#|^\s*$|^\s*[a-z_][^[:space:]]*=[^;&\(\`]*$)"
+    if egrep -q -iv "$CONFIG_SYNTAX" "$ENV_CONF"; then
+      echo "Config file is unclean, please check it..." >&2
+      exit 1
+    fi
+    # now source it, either the original or the filtered variant
+    export $(cat $ENV_CONF | grep -v ^\# | xargs)
+    echo $MAILCOW_TZ
+    #source "$ENV_CONF"
+else
+    echo "There is no configuration file call ${ENV_CONF}"
+    pause
+fi
+}
+
 pause(){
   read -p "Press [Enter] key to continue..." fackEnterKey
 }
@@ -100,22 +119,6 @@ machine_ip(){
 	fi
         $DM_BIN ip $DIGITALOCEAN_HOSTNAME
 	pause
-}
-
-machine_subcommand() {
-        local subcommand="$1"
-        case $subcommand in
-                active) $DM_BIN active ;;
-                config) $DM_BIN config $DIGITALOCEAN_HOSTNAME ;;
-                env) $DM_BIN env $DIGITALOCEAN_HOSTNAME ;;
-                env) $DM_BIN env ;;
-                4) mailcow_install ;;
-                5) mailcow_start ;;
-                0) exit 0;;
-                *) echo -e "${RED}Error...${STD}" && sleep 1
-        esac
-
-
 }
 
 
@@ -253,7 +256,7 @@ while getopts "hd" opt; do
 	esac
 done
 
-
+read_env_conf
 while true
 do
 	show_menu_main
