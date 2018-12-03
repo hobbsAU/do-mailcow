@@ -40,7 +40,7 @@ DM_PARMS+=(--digitalocean-userdata $DIGITALOCEAN_USERDATA)
 fi
 
 if [ ! -z "$DIGITALOCEAN_SSH_KEY_PATH" ]; then
-DM_PARMS+=(--digitalocean-ssh-key-path $DIGITALOCEAN_USERDATA)
+DM_PARMS+=(--digitalocean-ssh-key-path $DIGITALOCEAN_SSH_KEY_PATH)
 fi
 
 if [ ! -z "$DIGITALOCEAN_SSH_PORT" ]; then
