@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+
+set -o errexit
+set -o nounset
+set -o pipefail
+
+function log {
+	local now=$(date +'%Y-%m-%d %H:%M:%S')
+	echo "[$now] $1"
+}
+
+function create_droplet {
+    doctl compute droplet create "$1" --wait --size "$2" --image "$3" --region "$4" --ssh-keys "$5" --tag-names "$6"
+}
+
+function create_volume {
+    doctl compute volume create "$1" --region "$2" --size "$3" --desc "Volume for $1"
+}
+
+function attach_volume_to_droplet {
+    local volume=$(doctl compute volume list | grep "$1" | awk '{ print $1 }')
+    local droplet=$(doctl compute droplet list | grep "$2" | awk '{ print $1 }')
+    doctl compute volume-action attach "$volume" "$droplet"
+}
+
+function create_load_balancer {
+    doctl compute load-balancer create --name "$1" --region "$2" --tag-name "$3" --forwarding-rules "entry_protocol:http,entry_port:80,target_protocol:http,target_port:9000"
+}
+
+function delete_droplet {
+    doctl compute droplet delete --force "$1"
+}
+
+function delete_volume {
+    doctl compute volume delete "$1"
+}
+
+function delete_load_balancer {
+    doctl compute load-balancer delete --force "$1"
+}
+
