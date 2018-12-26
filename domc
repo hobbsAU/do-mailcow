@@ -1,8 +1,53 @@
 #!/usr/bin/env bash
+# A menu driven shell script to provision mailcow on DigitalOcean
 
 set -o errexit
 set -o nounset
 set -o pipefail
+
+
+## ----------------------------------
+# Section: Define variables
+# ----------------------------------
+DEBUG=1
+DO_BIN=/usr/bin/doctl
+ENV_CONF='env.conf'
+
+
+# ----------------------------------
+#  Section: User defined functions
+# ----------------------------------
+function read_env_conf {
+if [ -f ${ENV_CONF} ]; then
+    echo "Reading user config...." >&2
+
+    # check if the file contains something we don't want
+    CONFIG_SYNTAX="(^\s*#|^\s*$|^\s*[a-z_][^[:space:]]*=[^;&\(\`]*$)"
+    if egrep -q -iv "$CONFIG_SYNTAX" "$ENV_CONF"; then
+      echo "Config file is unclean, please check it..." >&2
+      exit 1
+    fi
+    # now source it, either the original or the filtered variant
+    export $(cat $ENV_CONF | grep -v ^\# | xargs)
+    echo $MAILCOW_TZ
+    #source "$ENV_CONF"
+else
+    echo "There is no configuration file call ${ENV_CONF}"
+    pause
+fi
+
+#Must have access token and hostname    
+if [[ ! ${#DIGITALOCEAN_ACCESS_TOKEN} == 64 ]]; then
+  while [[ ! ${#DIGITALOCEAN_ACCESS_TOKEN} == 64 ]]; do
+    read -ep "DigitalOcean API Token (must be generated via DigitalOcean control panel): " DIGITALOCEAN_ACCESS_TOKEN
+  done
+fi
+}
+
+function pause {
+  read -p "Press [Enter] key to continue..." fackEnterKey
+}
+
 
 function log {
 	local now=$(date +'%Y-%m-%d %H:%M:%S')
@@ -10,7 +55,35 @@ function log {
 }
 
 function create_droplet {
-    doctl compute droplet create "$1" --wait --size "$2" --image "$3" --region "$4" --ssh-keys "$5" --tag-names "$6"
+local   PARMS="compute droplet create $1 --wait --size $2 --image $3 --region $4 --ssh-keys $5 --tag-names $6"
+
+	if [ ! -z "$DROPLET_USERDATAFILE" ]; then
+		PARMS+=(--user-data-file $DROPLET_USERDATAFILE)
+	fi
+
+	if [ ! -z "$DROPLET_MONITORING" ] && [ $DROPLET_MONITORING = "true" ] ; then
+		PARMS+=(--enable-monitoring)
+	fi
+
+        if [ $DEBUG -eq "1" ]; then
+                echo "${PARMS[@]}";
+                eval "printenv |grep DIGITAL";
+        fi
+
+	eval "$DO_BIN ${PARMS[@]}"
+
+}
+
+function delete_droplet {
+	$DO_BIN compute droplet delete --force "$1"
+}
+
+function get_droplet {
+	$DO_BIN compute droplet get "$1"
+}
+
+function list_droplet {
+	$DO_BIN compute droplet list
 }
 
 function create_volume {
@@ -23,19 +96,197 @@ function attach_volume_to_droplet {
     doctl compute volume-action attach "$volume" "$droplet"
 }
 
-function create_load_balancer {
-    doctl compute load-balancer create --name "$1" --region "$2" --tag-name "$3" --forwarding-rules "entry_protocol:http,entry_port:80,target_protocol:http,target_port:9000"
-}
-
-function delete_droplet {
-    doctl compute droplet delete --force "$1"
-}
-
 function delete_volume {
     doctl compute volume delete "$1"
 }
 
-function delete_load_balancer {
-    doctl compute load-balancer delete --force "$1"
+function execute_command {
+	echo "$DO_BIN compute ssh "$1" --ssh-command "$2" --ssh-port $DROPLET_SSH_PORT --ssh-user $DROPLET_SSH_USER --ssh-key-path $DROPLET_SSH_KEY_PATH"
+	$DO_BIN compute ssh "$1" --ssh-command "$2" --ssh-port $DROPLET_SSH_PORT --ssh-user $DROPLET_SSH_USER --ssh-key-path $DROPLET_SSH_KEY_PATH
 }
+
+function show_help {
+echo "Usage: "
+}
+
+
+#Install Docker
+function docker_install {
+        $DO_BIN compute ssh $DROPLET_HOSTNAME --ssh-port $DROPLET_SSH_PORT --ssh-user $DROPLET_SSH_USER --ssh-key-path $DROPLET_SSH_KEY_PATH --ssh-command 'sudo bash -s' <<EOF
+	apt-get install -y \
+     	apt-transport-https \
+     	ca-certificates \
+     	curl \
+     	gnupg2 \
+     	software-properties-common
+	curl -fsSL https://download.docker.com/linux/debian/gpg | apt-key add -
+	add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/debian \$(lsb_release -cs) stable"
+	apt-get update
+	apt-get install -y docker-ce
+	curl -L https://github.com/docker/compose/releases/download/\$(curl -Ls https://www.servercow.de/docker-compose/latest.php)/docker-compose-\$(uname -s)-\$(uname -m) \
+	> /usr/local/bin/docker-compose
+	chmod +x /usr/local/bin/docker-compose
+	docker run hello-world
+EOF
+}
+
+
+#Install Mailcow
+function mailcow_install {
+	$DO_BIN compute ssh $DROPLET_HOSTNAME --ssh-port $DROPLET_SSH_PORT --ssh-user $DROPLET_SSH_USER --ssh-key-path $DROPLET_SSH_KEY_PATH --ssh-command 'sudo bash -s' <<EOF
+		export MAILCOW_HOSTNAME=$DROPLET_HOSTNAME
+		export MAILCOW_TZ=$MAILCOW_TZ
+		umask 0022
+		whoami && umask
+		rm -rf /opt/mailcow*
+		cd /opt
+		git clone https://github.com/mailcow/mailcow-dockerized
+		cd mailcow-dockerized
+		./generate_config.sh
+		exit 0
+EOF
+}
+
+function mailcow_start {
+	$DO_BIN compute ssh $DROPLET_HOSTNAME --ssh-port $DROPLET_SSH_PORT --ssh-user $DROPLET_SSH_USER --ssh-key-path $DROPLET_SSH_KEY_PATH --ssh-command 'sudo bash -s' <<EOF
+        cd /opt/mailcow-dockerized/
+	pwd
+	ls -al
+	docker-compose pull
+	docker-compose up -d
+EOF
+}
+
+
+function show_menu_droplet {
+        clear
+        echo "~~~~~~~~~~~~~~~~~~~~~~~~~"        
+        echo " D R O P L E T - M E N U"
+        echo "~~~~~~~~~~~~~~~~~~~~~~~~~"
+        echo "1.  Create Prod Droplet 	- Create and configure mailcow Droplet"
+        echo "2.  Destroy Prod Droplet 	- Destroy mailcow Droplet"
+        echo "3.  Inspect Prod Droplet 	- Inspect mailcow Droplet"
+        echo "4.  List Droplets		- List Droplets"
+        echo "5.  SSH to Droplet   		- SSH to Droplet"
+        echo "0.  Exit"
+}
+
+function read_menu_droplet {
+        local choice
+        if [ -z "$DROPLET_HOSTNAME" ]; then
+                while [ -z "$DROPLET_HOSTNAME" ]; do
+                        list_droplet 
+                        read -ep "Name: " DIGITALOCEAN_HOSTNAME
+                done
+        fi
+        echo ""
+        read -p "Enter choice [ 0 - 11 ] " choice
+        case $choice in
+                1) 
+			DROPLET_TAG="MAILCOW_PROD"
+			log "Creating Droplet: $DROPLET_HOSTNAME in $DROPLET_REGION tagged with $DROPLET_TAG"
+			create_droplet "$DROPLET_HOSTNAME" "$DROPLET_SIZE" "$DROPLET_IMAGE" "$DROPLET_REGION" "$DROPLET_SSHKEY" "$DROPLET_TAG"
+			pause ;;
+                2) 
+                        DROPLET_TAG="MAILCOW_PROD"
+			for droplet_id in $($DO_BIN compute droplet list | grep "$DROPLET_TAG" | awk '{ print $1 }'); do
+	            		log "Deleting Droplet $droplet_id"
+ 				delete_droplet "$droplet_id";
+			done;
+			pause ;;
+                3) 
+                        DROPLET_TAG="MAILCOW_PROD"
+			for droplet_id in $($DO_BIN compute droplet list | grep "$DROPLET_TAG" | awk '{ print $1 }'); do
+            			log "Inspecting Droplet $droplet_id"
+            			get_droplet "$droplet_id";
+        		done;
+			pause ;;
+
+                4) 
+			log "Listing all Droplets"
+			list_droplet
+			pause ;;
+                5) 
+			log "SSH to Droplet: $DROPLET_HOSTNAME"
+			$DO_BIN compute ssh $DROPLET_HOSTNAME --ssh-port $DROPLET_SSH_PORT --ssh-user $DROPLET_SSH_USER --ssh-key-path $DROPLET_SSH_KEY_PATH
+			pause ;;
+                0) return 1;;
+                *) echo -e "${RED}Error...${STD}" && sleep 1
+        esac
+}
+
+
+function menu_droplet {
+local loop_exit=0
+while [ $loop_exit -eq 0 ]
+do
+        show_menu_droplet
+        read_menu_droplet
+        loop_exit=$?
+done
+}
+
+
+
+# Function to display main menu
+function show_menu_main {
+        clear
+        echo "~~~~~~~~~~~~~~~~~~~~~"    
+        echo " M A I N - M E N U"
+        echo "~~~~~~~~~~~~~~~~~~~~~"
+        echo "1. DigitalOcean Droplet"
+        echo "2. DigitalOcean Volumes"
+        echo "3. DigitalOcean Network"
+        echo "4. Docker Install"
+        echo "5. Mailcow"
+        echo "0. Exit"
+}
+
+# read input from the keyboard and take a action
+# invoke the one() when the user select 1 from the menu option.
+# invoke the two() when the user select 2 from the menu option.
+# Exit when user the user select 3 form the menu option.
+function read_menu_main {
+        local choice
+        read -p "Enter choice [ 0 - 5 ] " choice
+        case $choice in
+                1) menu_droplet ;;
+                2) ;;
+                3) ;;
+                4) docker_install; pause;;
+                5) mailcow_install; pause ;;
+                0) exit 0;;
+                *) echo -e "${RED}Error...${STD}" && sleep 1
+        esac
+}
+
+
+
+
+# ----------------------------------------------
+# Section: Trap CTRL+C, CTRL+Z and quit singles
+# ----------------------------------------------
+trap '' SIGINT SIGQUIT SIGTSTP
+
+# -----------------------------------
+# Section: Main logic - infinite loop
+# ------------------------------------
+
+while getopts "hd" opt; do
+    case "$opt" in
+    h|\?)
+        show_help
+        exit 0
+        ;;
+    d)  DEBUG=1
+        ;;
+        esac
+done
+
+read_env_conf
+while true
+do
+        show_menu_main
+        read_menu_main
+done
 
