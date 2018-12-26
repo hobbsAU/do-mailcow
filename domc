@@ -42,6 +42,13 @@ if [[ ! ${#DIGITALOCEAN_ACCESS_TOKEN} == 64 ]]; then
     read -ep "DigitalOcean API Token (must be generated via DigitalOcean control panel): " DIGITALOCEAN_ACCESS_TOKEN
   done
 fi
+if [ -z "$DROPLET_HOSTNAME" ]; then
+	while [ -z "$DROPLET_HOSTNAME" ]; do
+        	list_droplet 
+        	read -ep "Name: " DIGITALOCEAN_HOSTNAME
+        done
+fi
+
 }
 
 function pause {
@@ -71,6 +78,8 @@ local   PARMS="compute droplet create $1 --wait --size $2 --image $3 --region $4
         fi
 
 	eval "$DO_BIN ${PARMS[@]}"
+	
+	$DO_BIN compute domain records update email.hob.bs --record-ttl 60 --record-name mail1 --record-id 59435401 --record-data $($DO_BIN compute droplet list | grep "$DROPLET_TAG" | awk '{ print $3 }')
 
 }
 
@@ -97,13 +106,54 @@ function attach_volume_to_droplet {
     doctl compute volume-action attach "$volume" "$droplet"
 }
 
-function delete_volume {
-    doctl compute volume delete "$1"
+
+function attach_volume {
+	#Attach volume
+	droplet_id=$($DO_BIN compute droplet list | grep "$DROPLET_TAG" | awk '{ print $1 }');
+	volume_id=$($DO_BIN compute volume list | grep "$DROPLET_TAG-vol" | awk '{ print $1 }');
+        
+	if [ ! -z $droplet_id ] && [ ! -z $volume_id ]; then
+		log "Attaching Volume: $volume_id to Droplet: $droplet_id"
+		execute_command $droplet_id "sudo mkdir -p /mnt/$DROPLET_TAG-vol && sudo grep -q -F '/dev/disk/by-id/scsi-0DO_Volume_$DROPLET_TAG-vol /mnt/$DROPLET_TAG-vol ext4 defaults,nofail,discard 0 0' /etc/fstab || echo '/dev/disk/by-id/scsi-0DO_Volume_$DROPLET_TAG-vol /mnt/$DROPLET_TAG-vol ext4 defaults,nofail,discard 0 0' | sudo tee -a /etc/fstab"
+        	$DO_BIN compute volume-action attach $volume_id $droplet_id;
+		#execute_command $droplet_id "sudo mkdir -p /mnt/$DROPLET_TAG-vol"
+		execute_command $droplet_id "sudo mount -a"
+		#execute_command $droplet_id "sudo mkdir -p /mnt/$DROPLET_TAG-vol sudo mount -a"
+	else
+		log "Droplet and Volume must exist!"
+	fi
+
+}
+
+
+function detach_volume {
+	#Detach volume
+	droplet_id=$($DO_BIN compute droplet list | grep "$DROPLET_TAG" | awk '{ print $1 }');
+	volume_id=$($DO_BIN compute volume list | grep "$DROPLET_TAG-vol" | awk '{ print $1 }');
+        if [ ! -z $droplet_id ] && [ ! -z $volume_id ]; then
+		log "Detaching Volume: $volume_id from Droplet: $droplet_id"
+        	$DO_BIN compute droplet-action power-off --wait $droplet_id;
+        	$DO_BIN compute volume-action detach $volume_id $droplet_id;
+	else
+		log "Droplet and Volume must exist!"
+	fi
+}
+
+function attach_floatingip {
+	droplet_id=$($DO_BIN compute droplet list | grep "$DROPLET_TAG" | awk '{ print $1 }');
+        if [ ! -z $droplet_id ] && [ ! -z $NETWORK_FLOATINGIP ]; then
+		log "Attaching floating IP: $NETWORK_FLOATINGIP to Droplet: $droplet_id"
+        	$DO_BIN compute floating-ip-action assign $NETWORK_FLOATINGIP $droplet_id;
+	else
+		log "Droplet and Floating IP must exist!"
+	fi
+	
 }
 
 function execute_command {
-	echo "$DO_BIN compute ssh "$1" --ssh-command "$2" --ssh-port $DROPLET_SSH_PORT --ssh-user $DROPLET_SSH_USER --ssh-key-path $DROPLET_SSH_KEY_PATH"
-	$DO_BIN compute ssh "$1" --ssh-command "$2" --ssh-port $DROPLET_SSH_PORT --ssh-user $DROPLET_SSH_USER --ssh-key-path $DROPLET_SSH_KEY_PATH
+	echo "$2"
+	#log "$DO_BIN compute ssh "$1" --ssh-command "$2" --ssh-port $DROPLET_SSH_PORT --ssh-user $DROPLET_SSH_USER --ssh-key-path $DROPLET_SSH_KEY_PATH"
+	$DO_BIN compute ssh "$1" --ssh-port $DROPLET_SSH_PORT --ssh-user $DROPLET_SSH_USER --ssh-key-path $DROPLET_SSH_KEY_PATH --ssh-command "$2"
 }
 
 function show_help {
@@ -113,7 +163,8 @@ echo "Usage: "
 
 #Install Mailcow
 function mailcow_install {
-	$DO_BIN compute ssh $DROPLET_HOSTNAME --ssh-port $DROPLET_SSH_PORT --ssh-user $DROPLET_SSH_USER --ssh-key-path $DROPLET_SSH_KEY_PATH --ssh-command 'sudo bash -s' <<EOF
+	#$DO_BIN compute ssh $DROPLET_HOSTNAME --ssh-port $DROPLET_SSH_PORT --ssh-user $DROPLET_SSH_USER --ssh-key-path $DROPLET_SSH_KEY_PATH --ssh-command 'sudo bash -s' <<EOF
+	execute_command $DROPLET_HOSTNAME 'sudo bash -s' <<EOF
 		export MAILCOW_HOSTNAME=$DROPLET_HOSTNAME
 		export MAILCOW_TZ=$MAILCOW_TZ
 		umask 0022
@@ -123,15 +174,17 @@ function mailcow_install {
 		git clone https://github.com/mailcow/mailcow-dockerized
 		cd mailcow-dockerized
 		./generate_config.sh
+		echo '{  "data-root": "/mnt/mailcow-prod-1-vol/docker" }' | sudo tee /etc/docker/daemon.json
+		sudo systemctl restart docker
 		exit 0
 EOF
 }
 
 function mailcow_start {
-	$DO_BIN compute ssh $DROPLET_HOSTNAME --ssh-port $DROPLET_SSH_PORT --ssh-user $DROPLET_SSH_USER --ssh-key-path $DROPLET_SSH_KEY_PATH --ssh-command 'sudo bash -s' <<EOF
+	#$DO_BIN compute ssh $DROPLET_HOSTNAME --ssh-port $DROPLET_SSH_PORT --ssh-user $DROPLET_SSH_USER --ssh-key-path $DROPLET_SSH_KEY_PATH --ssh-command 'sudo bash -s' <<EOF
+	execute_command $DROPLET_HOSTNAME 'sudo bash -s' <<EOF
         cd /opt/mailcow-dockerized/
 	pwd
-	ls -al
 	docker-compose pull
 	docker-compose up -d
 EOF
@@ -143,11 +196,13 @@ function show_menu_droplet {
         echo "~~~~~~~~~~~~~~~~~~~~~~~~~"        
         echo " D R O P L E T - M E N U"
         echo "~~~~~~~~~~~~~~~~~~~~~~~~~"
-        echo "1.  Create Droplet 	- Create and configure mailcow Droplet"
-        echo "2.  Destroy Droplet 	- Destroy mailcow Droplet"
+        echo "1.  Create Droplet 		- Create and configure mailcow Droplet"
+        echo "2.  Destroy Droplet 		- Destroy mailcow Droplet"
         echo "3.  List Droplets		- List Droplets"
         echo "4.  Attach Volume		- Attach Volume to Droplet"
         echo "5.  Detach Volume		- Remove Volume from Droplet"
+        echo "6.  Attach Floating IP		- Attach Floating IP to Droplet"
+        echo "7.  Power On 		- Power on Droplet"
         echo "9.  SSH to Droplet   		- SSH to Droplet"
         echo "0.  Exit"
 }
@@ -157,12 +212,6 @@ function read_menu_droplet {
 	local droplet_id
 	local volume_id
 
-        if [ -z "$DROPLET_HOSTNAME" ]; then
-                while [ -z "$DROPLET_HOSTNAME" ]; do
-                        list_droplet 
-                        read -ep "Name: " DIGITALOCEAN_HOSTNAME
-                done
-        fi
         echo ""
         read -p "Enter choice [ 0 - 11 ] " choice
         case $choice in
@@ -189,31 +238,21 @@ function read_menu_droplet {
 			list_droplet
 			pause ;;
                 4) 
-			#Attach volume
-			droplet_id=$($DO_BIN compute droplet list | grep "$DROPLET_TAG" | awk '{ print $1 }');
-			volume_id=$($DO_BIN compute volume list | grep "$VOLUME_NAME" | awk '{ print $1 }');
-            			if [ ! -z $droplet_id ] && [ ! -z $volume_id ]; then
-					log "Attaching Volume: $volume_id to Droplet: $droplet_id"
-            				$DO_BIN compute volume-action attach $volume_id $droplet_id;
-				else
-					log "Droplet and Volume must exist!"
-				fi
+			log "Attaching volume.."
+			attach_volume
 			pause ;;
                 5) 
-			#Detach volume
-			droplet_id=$($DO_BIN compute droplet list | grep "$DROPLET_TAG" | awk '{ print $1 }');
-			volume_id=$($DO_BIN compute volume list | grep "$VOLUME_NAME" | awk '{ print $1 }');
-            			if [ ! -z $droplet_id ] && [ ! -z $volume_id ]; then
-					log "Detaching Volume: $volume_id from Droplet: $droplet_id"
-            				$DO_BIN compute droplet-action power-off $droplet_id;
-            				$DO_BIN compute volume-action detach $volume_id $droplet_id;
-				else
-					log "Droplet and Volume must exist!"
-				fi
+			log "Detaching volume.."
+			detach_volume
 			pause ;;
+                6) 
+			log "Attaching Floating IP.."
+			attach_floatingip
+			pause ;;
+		7)	$DO_BIN compute droplet-action power-on --wait $($DO_BIN compute droplet list | grep "$DROPLET_TAG" | awk '{ print $1 }'); pause ;;
                 9) 
 			log "SSH to Droplet: $DROPLET_HOSTNAME"
-			$DO_BIN compute ssh $DROPLET_HOSTNAME --ssh-port $DROPLET_SSH_PORT --ssh-user $DROPLET_SSH_USER --ssh-key-path $DROPLET_SSH_KEY_PATH
+			$DO_BIN compute ssh $DROPLET_HOSTNAME --ssh-port $DROPLET_SSH_PORT --ssh-user $DROPLET_SSH_USER --ssh-key-path $DROPLET_SSH_KEY_PATH && echo "OK" || echo "Error";
 			pause ;;
                 0) return 1;;
                 *) echo -e "${RED}Error...${STD}" && sleep 1
@@ -231,7 +270,43 @@ do
 done
 }
 
+function read_menu_mailcow {
+        local choice
+        read -p "Enter choice [ 0 - 5 ] " choice
+        case $choice in
+                1) mailcow_install; pause ;;
+                2) mailcow_start; pause ;;
+                3) mailcow_stop; pause ;;
+                5) pause ;;
+                0) exit 0;;
+                *) echo -e "${RED}Error...${STD}" && sleep 1
+        esac
+}
 
+
+
+function show_menu_mailcow {
+        clear
+        echo "~~~~~~~~~~~~~~~~~~~~~~~~~"        
+        echo " M A I L C O W - M E N U"
+        echo "~~~~~~~~~~~~~~~~~~~~~~~~~"
+        echo "1.  Mailcow Install 		- Create and configure mailcow Droplet"
+        echo "2.  Mailcow Start 		- Destroy mailcow Droplet"
+        echo "3.  Mailcow Stop		- List Droplets"
+        echo "4.  Mailcow Backup Config		- Attach Volume to Droplet"
+        echo "5.  Mailcow Backup Data		- Remove Volume from Droplet"
+        echo "0.  Exit"
+}
+
+function menu_mailcow {
+local loop_exit=0
+while [ $loop_exit -eq 0 ]
+do
+        show_menu_mailcow
+        read_menu_mailcow
+        loop_exit=$?
+done
+}
 
 # Function to display main menu
 function show_menu_main {
@@ -257,7 +332,7 @@ function read_menu_main {
                 1) menu_droplet ;;
                 2) ;;
                 3) ;;
-                5) mailcow_install; pause ;;
+                5) menu_mailcow; pause ;;
                 0) exit 0;;
                 *) echo -e "${RED}Error...${STD}" && sleep 1
         esac
