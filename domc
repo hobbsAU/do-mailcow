@@ -2,7 +2,7 @@
 # A menu driven shell script to provision mailcow on DigitalOcean
 
 set -o errexit
-set -o nounset
+#set -o nounset
 set -o pipefail
 
 
@@ -11,7 +11,7 @@ set -o pipefail
 # ----------------------------------
 DEBUG=1
 DO_BIN=/usr/bin/doctl
-ENV_CONF='env.conf'
+[ -z "$ENV_CONF" ] && ENV_CONF='env.conf'
 
 
 # ----------------------------------
@@ -75,6 +75,7 @@ local   PARMS="compute droplet create $1 --wait --size $2 --image $3 --region $4
 }
 
 function delete_droplet {
+	$DO_BIN compute droplet-action power-off --wait "$1"
 	$DO_BIN compute droplet delete --force "$1"
 }
 
@@ -110,27 +111,6 @@ echo "Usage: "
 }
 
 
-#Install Docker
-function docker_install {
-        $DO_BIN compute ssh $DROPLET_HOSTNAME --ssh-port $DROPLET_SSH_PORT --ssh-user $DROPLET_SSH_USER --ssh-key-path $DROPLET_SSH_KEY_PATH --ssh-command 'sudo bash -s' <<EOF
-	apt-get install -y \
-     	apt-transport-https \
-     	ca-certificates \
-     	curl \
-     	gnupg2 \
-     	software-properties-common
-	curl -fsSL https://download.docker.com/linux/debian/gpg | apt-key add -
-	add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/debian \$(lsb_release -cs) stable"
-	apt-get update
-	apt-get install -y docker-ce
-	curl -L https://github.com/docker/compose/releases/download/\$(curl -Ls https://www.servercow.de/docker-compose/latest.php)/docker-compose-\$(uname -s)-\$(uname -m) \
-	> /usr/local/bin/docker-compose
-	chmod +x /usr/local/bin/docker-compose
-	docker run hello-world
-EOF
-}
-
-
 #Install Mailcow
 function mailcow_install {
 	$DO_BIN compute ssh $DROPLET_HOSTNAME --ssh-port $DROPLET_SSH_PORT --ssh-user $DROPLET_SSH_USER --ssh-key-path $DROPLET_SSH_KEY_PATH --ssh-command 'sudo bash -s' <<EOF
@@ -163,16 +143,20 @@ function show_menu_droplet {
         echo "~~~~~~~~~~~~~~~~~~~~~~~~~"        
         echo " D R O P L E T - M E N U"
         echo "~~~~~~~~~~~~~~~~~~~~~~~~~"
-        echo "1.  Create Prod Droplet 	- Create and configure mailcow Droplet"
-        echo "2.  Destroy Prod Droplet 	- Destroy mailcow Droplet"
-        echo "3.  Inspect Prod Droplet 	- Inspect mailcow Droplet"
-        echo "4.  List Droplets		- List Droplets"
-        echo "5.  SSH to Droplet   		- SSH to Droplet"
+        echo "1.  Create Droplet 	- Create and configure mailcow Droplet"
+        echo "2.  Destroy Droplet 	- Destroy mailcow Droplet"
+        echo "3.  List Droplets		- List Droplets"
+        echo "4.  Attach Volume		- Attach Volume to Droplet"
+        echo "5.  Detach Volume		- Remove Volume from Droplet"
+        echo "9.  SSH to Droplet   		- SSH to Droplet"
         echo "0.  Exit"
 }
 
 function read_menu_droplet {
         local choice
+	local droplet_id
+	local volume_id
+
         if [ -z "$DROPLET_HOSTNAME" ]; then
                 while [ -z "$DROPLET_HOSTNAME" ]; do
                         list_droplet 
@@ -183,30 +167,51 @@ function read_menu_droplet {
         read -p "Enter choice [ 0 - 11 ] " choice
         case $choice in
                 1) 
-			DROPLET_TAG="MAILCOW_PROD"
-			log "Creating Droplet: $DROPLET_HOSTNAME in $DROPLET_REGION tagged with $DROPLET_TAG"
-			create_droplet "$DROPLET_HOSTNAME" "$DROPLET_SIZE" "$DROPLET_IMAGE" "$DROPLET_REGION" "$DROPLET_SSHKEY" "$DROPLET_TAG"
+			#Check if droplet exists with same tag
+			if [[ -z $($DO_BIN compute droplet list | grep "$DROPLET_TAG" | awk '{ print $1 }') ]]; then
+				#Create Droplet
+				log "Creating Droplet: $DROPLET_HOSTNAME in $DROPLET_REGION tagged with $DROPLET_TAG";
+				create_droplet "$DROPLET_HOSTNAME" "$DROPLET_SIZE" "$DROPLET_IMAGE" "$DROPLET_REGION" "$DROPLET_SSHKEY" "$DROPLET_TAG";
+			else
+				log "ERROR: Droplet already exists";
+			fi
 			pause ;;
                 2) 
-                        DROPLET_TAG="MAILCOW_PROD"
+			#Find and delete all Droplets with specific tag
 			for droplet_id in $($DO_BIN compute droplet list | grep "$DROPLET_TAG" | awk '{ print $1 }'); do
-	            		log "Deleting Droplet $droplet_id"
+	            		#[ -z $($DO_BIN compute list | grep "$DROPLET_TAG" | awk -F $'[[:space:]][[:space:]][[:space:]]+' '{ print $12 }') ] && echo "No Volumes" || $DO_BIN compute
+				log "Deleting Droplet $droplet_id";
  				delete_droplet "$droplet_id";
 			done;
 			pause ;;
                 3) 
-                        DROPLET_TAG="MAILCOW_PROD"
-			for droplet_id in $($DO_BIN compute droplet list | grep "$DROPLET_TAG" | awk '{ print $1 }'); do
-            			log "Inspecting Droplet $droplet_id"
-            			get_droplet "$droplet_id";
-        		done;
-			pause ;;
-
-                4) 
 			log "Listing all Droplets"
 			list_droplet
 			pause ;;
+                4) 
+			#Attach volume
+			droplet_id=$($DO_BIN compute droplet list | grep "$DROPLET_TAG" | awk '{ print $1 }');
+			volume_id=$($DO_BIN compute volume list | grep "$VOLUME_NAME" | awk '{ print $1 }');
+            			if [ ! -z $droplet_id ] && [ ! -z $volume_id ]; then
+					log "Attaching Volume: $volume_id to Droplet: $droplet_id"
+            				$DO_BIN compute volume-action attach $volume_id $droplet_id;
+				else
+					log "Droplet and Volume must exist!"
+				fi
+			pause ;;
                 5) 
+			#Detach volume
+			droplet_id=$($DO_BIN compute droplet list | grep "$DROPLET_TAG" | awk '{ print $1 }');
+			volume_id=$($DO_BIN compute volume list | grep "$VOLUME_NAME" | awk '{ print $1 }');
+            			if [ ! -z $droplet_id ] && [ ! -z $volume_id ]; then
+					log "Detaching Volume: $volume_id from Droplet: $droplet_id"
+            				$DO_BIN compute droplet-action power-off $droplet_id;
+            				$DO_BIN compute volume-action detach $volume_id $droplet_id;
+				else
+					log "Droplet and Volume must exist!"
+				fi
+			pause ;;
+                9) 
 			log "SSH to Droplet: $DROPLET_HOSTNAME"
 			$DO_BIN compute ssh $DROPLET_HOSTNAME --ssh-port $DROPLET_SSH_PORT --ssh-user $DROPLET_SSH_USER --ssh-key-path $DROPLET_SSH_KEY_PATH
 			pause ;;
@@ -237,7 +242,6 @@ function show_menu_main {
         echo "1. DigitalOcean Droplet"
         echo "2. DigitalOcean Volumes"
         echo "3. DigitalOcean Network"
-        echo "4. Docker Install"
         echo "5. Mailcow"
         echo "0. Exit"
 }
@@ -253,7 +257,6 @@ function read_menu_main {
                 1) menu_droplet ;;
                 2) ;;
                 3) ;;
-                4) docker_install; pause;;
                 5) mailcow_install; pause ;;
                 0) exit 0;;
                 *) echo -e "${RED}Error...${STD}" && sleep 1

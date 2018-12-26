@@ -100,11 +100,11 @@ users:
 runcmd: 
   - apt-get -y install docker-ce
   - apt-get -y autoremove
+  - sed -i -e '/^#Port/s/^.*$/Port 2222/' /etc/ssh/sshd_config
+  - systemctl restart sshd
   - curl -L https://github.com/docker/compose/releases/download/$(curl -Ls https://www.servercow.de/docker-compose/latest.php)/docker-compose-$(uname -s)-$(uname -m) > /usr/local/bin/docker-compose
   - chmod +x /usr/local/bin/docker-compose
   - export HOSTNAME=$(curl -s http://169.254.169.254/metadata/v1/hostname)
   - echo $HOSTNAME
   - export PUBLIC_IPV4=$(curl -s http://169.254.169.254/metadata/v1/interfaces/public/0/ipv4/address)
   - echo $PUBLIC_IPV4
-  - sed -i -e '/^#Port/s/^.*$/Port 2222/' /etc/ssh/sshd_config
-  - systemctl restart sshd
