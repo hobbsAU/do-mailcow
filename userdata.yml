@@ -86,6 +86,7 @@ packages:
   - curl 
   - gnupg2 
   - software-properties-common
+  - ufw
 
 users:
   - name: borger
@@ -100,6 +101,11 @@ users:
 runcmd: 
   - apt-get -y install docker-ce
   - apt-get -y autoremove
+  - echo "y" | ufw enable
+  - ufw rule allow proto tcp to 0.0.0.0/0 port 2222
+  - ufw default deny incoming
+  - ufw default allow outgoing 
+  - sed -i -e '/^#alias ll/s/^#//' /home/borger/.bashrc
   - sed -i -e '/^#Port/s/^.*$/Port 2222/' /etc/ssh/sshd_config
   - systemctl restart sshd
   - curl -L https://github.com/docker/compose/releases/download/$(curl -Ls https://www.servercow.de/docker-compose/latest.php)/docker-compose-$(uname -s)-$(uname -m) > /usr/local/bin/docker-compose
