@@ -9,7 +9,7 @@ git clone https://github.com/mailcow/mailcow-dockerized
 cd mailcow-dockerized
 ./generate_config.sh 
 if [[ -f /mnt/$mnt_dir/mailcow.conf ]]; then mv ./mailcow.conf ./mailcow.bak; cp /mnt/$mnt_dir/mailcow.conf .; else cp mailcow.conf /mnt/$mnt_dir/; fi
-echo '{  "data-root": "/mnt/$mnt_dir/docker" }' | sudo tee /etc/docker/daemon.json
+echo -e "{  \"data-root\": \"/mnt/$mnt_dir/docker\" }" | sudo tee /etc/docker/daemon.json
 sudo systemctl restart docker
 exit 0
 

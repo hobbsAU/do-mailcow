@@ -128,7 +128,7 @@ local droplet_id=""
 
 # Find and delete all Droplets with our tag
 for droplet_id in $($DO_BIN compute droplet list | grep "$DROPLET_TAG" | awk '{ print $1 }'); do
-	[[ -z $($DO_BIN compute list | grep "$DROPLET_TAG" | awk -F $'[[:space:]][[:space:]][[:space:]]+' '{ print $12 }') ]] || { log "Detatching volumes first.."; volume_detach; }
+	[[ -z $($DO_BIN compute droplet list | grep "$DROPLET_TAG" | awk -F $'[[:space:]][[:space:]][[:space:]]+' '{ print $12 }') ]] || { log "Detatching volumes first.."; volume_detach; }
 	log "Deleting Droplet $droplet_id";
 	$DO_BIN compute droplet-action power-off --wait "$droplet_id"
 	$DO_BIN compute droplet delete --force "$droplet_id"
@@ -160,6 +160,10 @@ $DO_BIN compute droplet-action reboot --wait ${1:-} && { log "Droplet successful
 }
 
 function droplet_rebuild() {
+# Check for mounted volumes
+[[ -z $($DO_BIN compute droplet list | grep "$DROPLET_TAG" | awk -F $'[[:space:]][[:space:]][[:space:]]+' '{ print $12 }') ]] || { log "Detatching volumes first.."; volume_detach; }
+
+# Rebuild droplet
 log "Rebuilding Droplet.."
 $DO_BIN compute droplet-action rebuild --wait ${1:-} --image ${DROPLET_IMAGE} && { log "Droplet successfully rebuilt"; return 0; } || { log "Problem rebuilding Droplet!"; return 0; }
 }
@@ -274,6 +278,7 @@ trap ' ' SIGINT;
 
 function show_help {
 echo "Usage: "
+
 }
 
 
@@ -373,7 +378,7 @@ while [ "$choice" != x ]; do
 		6) droplet_reboot "$($DO_BIN compute droplet list | grep "$DROPLET_TAG" | awk '{ print $1 }')"; pause ;;
 		7) droplet_rebuild "$($DO_BIN compute droplet list | grep "$DROPLET_TAG" | awk '{ print $1 }')"; pause ;;
 		8) droplet_update "$($DO_BIN compute droplet list | grep "$DROPLET_TAG" | awk '{ print $1 }')"; pause ;;
-                9) droplet_ssh; pause ;;
+                9) droplet_ssh || { log "Droplet unavailble"; };  pause ;;
                 x) return 0;;
                 *) echo -e "${RED}Error...${STD}" && sleep 1
         esac
