@@ -3,8 +3,6 @@
 ## Script
 * Move mailcow functions to server
 * Harden host firewall, sshd, dockerd etc
-* Implement mailcow environment settings
-* Implement error handling
 
 ## MC-Provisioning
 * automate mc deployment

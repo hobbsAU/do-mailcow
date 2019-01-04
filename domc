@@ -2,61 +2,53 @@
 # A menu driven shell script to provision mailcow on DigitalOcean
 
 #Set Bash sctrict modes
-set -o errexit
+set -o errexit 
 set -o nounset
 set -o pipefail
 IFS=$'\n\t'
+trap '' SIGINT SIGQUIT SIGTSTP
 
+########################
+### SCRIPT VARIABLES ###
+########################
 
-## ----------------------------------
-# Section: Define variables
-# ----------------------------------
+# Set debug
 DEBUG=1
+#set -x
+
+# Define command locations
 DO_BIN=/usr/bin/doctl
-ENV_CONF=${1:-env.conf}
+
+# Define constants
 BRED='\033[0;41;30m'
 STD='\033[0;0;39m'
 RED="\033[0;31m"          # Red
 BLUE="\033[0;34m"         # Blue
 PURPLE="\033[0;35m"       # Purple
-Black="\[\033[0;30m\]"        # Black
-Green="\[\033[0;32m\]"        # Green
-Yellow="\[\033[0;33m\]"       # Yellow
-Cyan="\[\033[0;36m\]"         # Cyan
-White="\[\033[0;37m\]"        # White
 
-# Bold
-BBlack="\[\033[1;30m\]"       # Black
-BRed="\[\033[1;31m\]"         # Red
-BGreen="\[\033[1;32m\]"       # Green
-BYellow="\[\033[1;33m\]"      # Yellow
-BBlue="\[\033[1;34m\]"        # Blue
-BPurple="\[\033[1;35m\]"      # Purple
-BCyan="\[\033[1;36m\]"        # Cyan
-BWhite="\[\033[1;37m\]"       # White
-#[ -z "${ENV_CONF:-}" ] && ENV_CONF='env.conf'
-echo $ENV_CONF
+# Configure Global variables
+ENV_CONF=${1:-env.conf}
 WAN_IP=$(dig @resolver1.opendns.com ANY myip.opendns.com +short)
 
 
-# ----------------------------------
-#  Section: User defined functions
-# ----------------------------------
-function read_env_conf {
-if [ -f ${ENV_CONF} ]; then
-    echo "Reading user config...." >&2
+########################
+### SCRIPT FUNCTIONS ###
+########################
 
+function read_env_conf() {
+if [[ -f "${ENV_CONF}" ]]; then
+    log "Reading user config...." >&2
     # check if the file contains something we don't want
     CONFIG_SYNTAX="(^\s*#|^\s*$|^\s*[a-z_][^[:space:]]*=[^;&\(\`]*$)"
     if egrep -q -iv "$CONFIG_SYNTAX" "$ENV_CONF"; then
-      echo "Config file is unclean, please check it..." >&2
+      log "Config file is unclean, please check it..." >&2
       exit 1
     fi
     # now source it, either the original or the filtered variant
     # export $(cat $ENV_CONF | grep -v ^\# | xargs)
     source "$ENV_CONF"
 else
-    echo "There is no configuration file call ${ENV_CONF}"
+    log "There is no configuration file call ${ENV_CONF}"
     pause
 fi
 
@@ -79,77 +71,102 @@ fi
 
 }
 
-function pause {
+function pause() {
   read -p "Press [Enter] key to continue..." fackEnterKey
 }
 
 
-function log {
+function log() {
 	local now=$(date +'%Y-%m-%d %H:%M:%S')
 	echo -e "${BLUE}[$now] $1${STD}"
 }
 
-function debug {
+function debug() {
 	local now=$(date +'%Y-%m-%d %H:%M:%S')
 	echo -e "${PURPLE}\n[$now] DEBUG: $1${STD}"
 }
 
 function droplet_create {
-local   PARMS="compute droplet create $1 --wait --size $2 --image $3 --region $4 --ssh-keys $5 --tag-names $6"
-local	parms=""
+local   parms=(compute droplet create $1 --wait --size $2 --image $3 --region $4 --ssh-keys $5 --tag-names $6)
+local	domain=${DROPLET_HOSTNAME#*.}
+local   host=${DROPLET_HOSTNAME%%.*}
 
-	#Check if droplet exists with same tag
-	if [[ ! -z $($DO_BIN compute droplet list | grep "$6" | awk '{ print $1 }') ]]; then
-		log "ERROR: Droplet already exists";
-		return 0;
-	fi
+#Check if droplet exists with same tag
+if [[ ! -z $($DO_BIN compute droplet list | grep "$6" | awk '{ print $1 }') ]]; then
+	log "ERROR: Droplet already exists";
+	return 0;
+fi
 
-	#Create Droplet
-	log "Creating Droplet: $DROPLET_HOSTNAME in $DROPLET_REGION tagged with $DROPLET_TAG";
-	if [ ! -z "$DROPLET_USERDATAFILE" ]; then
-		PARMS+=(--user-data-file $DROPLET_USERDATAFILE)
-	fi
+#Create Droplet
+log "Creating Droplet: $DROPLET_HOSTNAME in $DROPLET_REGION tagged with $DROPLET_TAG";
+if [ ! -z "$DROPLET_USERDATAFILE" ]; then
+	parms+=(--user-data-file $DROPLET_USERDATAFILE)
+fi
 
-	if [ ! -z "$DROPLET_MONITORING" ] && [ $DROPLET_MONITORING = "true" ] ; then
-		PARMS+=(--enable-monitoring)
-	fi
+if [ ! -z "$DROPLET_MONITORING" ] && [ $DROPLET_MONITORING = "true" ] ; then
+	parms+=(--enable-monitoring)
+fi
 
-        if [ $DEBUG -eq "1" ]; then
-                debug "${PARMS[@]}";
-                debug "$(printenv |grep DIGITAL)";
-        fi
+if [ $DEBUG -eq "1" ]; then
+	debug "$(printenv |grep DIGITAL)";
+fi
 
-	eval "$DO_BIN ${PARMS[@]}" && {
-	log "Created Droplet, updating DNS..";
-	$DO_BIN compute domain records update email.hob.bs --record-ttl 60 --record-name mail1 --record-id 59435401 --record-data $($DO_BIN compute droplet list | grep "$DROPLET_TAG" | awk '{ print $3 }') || { log "Error updating DNS!"; return 0; };
-	# Wait for reboot.
-	until execute_command $DROPLET_HOSTNAME 'last';  do
-	log "Waiting for Droplet reboot.."
-	sleep 30
-	done
-	} || { log "Error creating Droplet!"; return 0; }
-	
+$DO_BIN "${parms[@]}" && {
+log "Created Droplet, updating DNS..";
+$DO_BIN compute domain records update $domain --record-ttl 60 --record-name $host --record-id $($DO_BIN compute domain records list $domain |grep "$host " |awk '{ print $1 }') --record-data $($DO_BIN compute droplet list | grep "$DROPLET_TAG" | awk '{ print $3 }') || { log "Error updating DNS!"; return 0; };
+# Wait for reboot.
+until droplet_ssh 'last';  do
+log "Waiting for Droplet reboot.."
+sleep 30
+done
+} || { log "Error creating Droplet!"; return 0; }
+
 }
 
 function droplet_delete {
 local droplet_id=""
 
-	#Find and delete all Droplets with specific tag
-	for droplet_id in $($DO_BIN compute droplet list | grep "$1" | awk '{ print $1 }'); do
-	         		#[ -z $($DO_BIN compute list | grep "$DROPLET_TAG" | awk -F $'[[:space:]][[:space:]][[:space:]]+' '{ print $12 }') ] && echo "No Volumes" || $DO_BIN compute
-		log "Deleting Droplet $droplet_id";
-		$DO_BIN compute droplet-action power-off --wait "$droplet_id"
-		$DO_BIN compute droplet delete --force "$droplet_id"
-	done;
+# Find and delete all Droplets with our tag
+for droplet_id in $($DO_BIN compute droplet list | grep "$DROPLET_TAG" | awk '{ print $1 }'); do
+	[[ -z $($DO_BIN compute list | grep "$DROPLET_TAG" | awk -F $'[[:space:]][[:space:]][[:space:]]+' '{ print $12 }') ]] || { log "Detatching volumes first.."; volume_detach; }
+	log "Deleting Droplet $droplet_id";
+	$DO_BIN compute droplet-action power-off --wait "$droplet_id"
+	$DO_BIN compute droplet delete --force "$droplet_id"
+done;
 }
 
-function droplet_get {
-	$DO_BIN compute droplet get "$1"
+function droplet_get() {
+$DO_BIN compute droplet get "$1"
 }
 
-function droplet_list {
-	log "Listing all Droplets"
-	$DO_BIN compute droplet list || { log "Error listing Droplets"; return 0; }
+function droplet_list() {
+log "Listing all Droplets.."
+$DO_BIN compute droplet list || { log "Error listing Droplets"; return 0; }
+}
+
+function droplet_on() {
+log "Turning on Droplet.."
+$DO_BIN compute droplet-action power-on --wait ${1:-} && { log "Droplet successfully started"; return 0; } || { log "Problem powering on Droplet!"; return 0; }
+}
+
+function droplet_off() {
+log "Turning off Droplet.."
+$DO_BIN compute droplet-action power-off --wait ${1:-} && { log "Droplet successfully shutdown"; return 0; } || { log "Problem powering off Droplet!"; return 0; }
+}
+
+function droplet_reboot() {
+log "Rebooting Droplet.."
+$DO_BIN compute droplet-action reboot --wait ${1:-} && { log "Droplet successfully rebooted"; return 0; } || { log "Problem rebooting Droplet!"; return 0; }
+}
+
+function droplet_rebuild() {
+log "Rebuilding Droplet.."
+$DO_BIN compute droplet-action rebuild --wait ${1:-} --image ${DROPLET_IMAGE} && { log "Droplet successfully rebuilt"; return 0; } || { log "Problem rebuilding Droplet!"; return 0; }
+}
+
+function droplet_update() {
+log "Updating Droplet.."
+droplet_ssh "sudo apt-get update && sudo apt-get -y upgrade && sudo apt-get -y dist-upgrade && sudo apt-get clean && sudo apt-get -y autoremove" && { log "Droplet successfully updated"; return 0; } || { log "Problem updating Droplet!"; return 0; }
 }
 
 
@@ -159,53 +176,34 @@ local volume_id=""
 local mnt_dir=""
 mnt_dir=$(echo "$DROPLET_TAG-vol" | sed -e 's/-/_/g')	
 
-	#Check for droplet and volume
-	droplet_id=$($DO_BIN compute droplet list | grep "$DROPLET_TAG" | awk '{ print $1 }') || { log "Droplet must exist"; return 0; }
-	volume_id=$($DO_BIN compute volume list | grep "$DROPLET_TAG-vol" | awk '{ print $1 }') || { 
-		log "Volume doesn't exist"; 
-		# Create new volume if necessary
-		if [ -z $volume_id ]; then
-			log "Creating new volume..";
-			volume_create;
-			volume_id=$($DO_BIN compute volume list | grep "$DROPLET_TAG-vol" | awk '{ print $1 }');
-		fi }
+# Check for droplet and volume
+droplet_id=$($DO_BIN compute droplet list | grep "$DROPLET_TAG" | awk '{ print $1 }') || { log "Droplet must exist"; return 0; }
+volume_id=$($DO_BIN compute volume list | grep "$DROPLET_TAG-vol" | awk '{ print $1 }') || { 
+	log "Volume doesn't exist"; 
+	# Create new volume if necessary
+	if [ -z $volume_id ]; then
+		log "Creating new volume..";
+		volume_create;
+		volume_id=$($DO_BIN compute volume list | grep "$DROPLET_TAG-vol" | awk '{ print $1 }');
+	fi }
 
-	#Check droplet is on
-	[[ $($DO_BIN compute droplet list | grep "$DROPLET_TAG" | awk '{ print $11 }') == "active" ]] || { log "Droplet must be powered on"; return 0; }
+# Check droplet is on
+[[ $($DO_BIN compute droplet list | grep "$DROPLET_TAG" | awk '{ print $11 }') == "active" ]] || { log "Droplet must be powered on"; return 0; }
+
+# Attach volume	
+if [ ! -z $droplet_id ] && [ ! -z $volume_id ]; then
+	log "Attaching Volume: $volume_id to Droplet: $droplet_id"
+	$DO_BIN compute volume-action attach $volume_id $droplet_id && log "Volume successfully attached" || { log "Problem attaching volume!"; return 0; }
 	
-	#Attach volume	
-	if [ ! -z $droplet_id ] && [ ! -z $volume_id ]; then
-        	#log "Creating mount point and fstab entries.."
-		#execute_command $droplet_id "sudo mkdir -p /mnt/$mnt_dir"
-        	#$DO_BIN compute droplet-action power-off --wait $droplet_id;
-		#pause;
-		log "Attaching Volume: $volume_id to Droplet: $droplet_id"
-        	$DO_BIN compute volume-action attach $volume_id $droplet_id && log "Volume successfully attached" || { log "Problem attaching volume!"; return 0; }
-                execute_command $DROPLET_HOSTNAME 'sudo bash -s' <<EOF
-                echo "[Unit]
-                Description=Mount DO Volume mailcow-prod-1-vol
-                
-                [Mount]
-                What=/dev/disk/by-id/scsi-0DO_Volume_mailcow-prod-1-vol
-                Where=/mnt/mailcow_prod_1_vol
-                Options=defaults,nofail,discard,noatime
-                Type=ext4
+	# Workaround DO Bug in automount on Debian 9.6
+	scriptenv="DROPLET_TAG=$DROPLET_TAG MNT_DIR=$mnt_dir"
+	droplet_sshBatch "$SCRIPT_VOLUME" "$scriptenv" ||  { log "Problem creating mount!"; return 0; };
+	$DO_BIN compute droplet-action reboot --wait $droplet_id && { log "Droplet successfully rebooted"; return 0; } || { log "Problem rebooting Droplet!"; return 0; }
 
-                [Install]
-                WantedBy = multi-user.target" | sudo tee /etc/systemd/system/mnt-mailcow_prod_1_vol.mount
-		sudo systemctl daemon-reload
-		sudo systemctl enable mnt-mailcow_prod_1_vol.mount
-EOF
-        	$DO_BIN compute droplet-action reboot --wait $droplet_id && log "Droplet successfully rebooted" || { log "Problem rebooting Droplet!"; return 0; }
-		#Put a reboot lock here?
-
-		#execute_command $droplet_id " sudo grep -q -F '/dev/disk/by-id/scsi-0DO_Volume_$DROPLET_TAG-vol /mnt/$mnt_dir ext4 defaults,noatime,nofail,discard 0 0' /etc/fstab || echo '/dev/disk/by-id/scsi-0DO_Volume_$DROPLET_TAG-vol /mnt/$mnt_dir ext4 defaults,noatime,nofail,discard 0 0' | sudo tee -a /etc/fstab" && log "Updated fstab and added mount directory." || log "SSH not running try again later";
-        	#log "Rebooting Droplet for changes to take effect.."
-		#$DO_BIN compute droplet-action reboot --wait $droplet_id && log "Droplet successfully rebooted" || { log "Problem rebooting Droplet!"; return 0; };
-		#execute_command $droplet_id "sudo mount -a" && log "Volume successfully mounted" && log "Mounted volume." || log "Error mounting volume!";
-	else
-		log "Droplet and Volume must exist!"
-	fi
+else
+	log "Droplet and Volume must exist!"; 
+	return 1;
+fi
 
 }
 
@@ -213,9 +211,11 @@ EOF
 function volume_detach {
 local droplet_id=""
 local volume_id=""
-	#Detach volume
-	droplet_id=$($DO_BIN compute droplet list | grep "$DROPLET_TAG" | awk '{ print $1 }');
-	volume_id=$($DO_BIN compute volume list | grep "$DROPLET_TAG-vol" | awk '{ print $1 }');
+
+droplet_id=$($DO_BIN compute droplet list | grep "$DROPLET_TAG" | awk '{ print $1 }');
+volume_id=$($DO_BIN compute volume list | grep "$DROPLET_TAG-vol" | awk '{ print $1 }');
+
+# If Droplet and Volume exists then Detach volume
         if [ ! -z $droplet_id ] && [ ! -z $volume_id ]; then
 		log "Detaching Volume: $volume_id from Droplet: $droplet_id"
         	$DO_BIN compute droplet-action power-off --wait $droplet_id;
@@ -227,27 +227,50 @@ local volume_id=""
 }
 
 function volume_create {
-	$DO_BIN compute volume create $DROPLET_TAG-vol --fs-type ext4 --region $DROPLET_REGION --size 10GiB || { log "Problem creating volume!"; return 0; }
+
+# Create volume
+log "Creating volume.."
+$DO_BIN compute volume create $DROPLET_TAG-vol --fs-type ext4 --region $DROPLET_REGION --size 10GiB || { log "Problem creating volume!"; return 0; }
+
 }
 
 
-function floatingip_attach {
-	droplet_id=$($DO_BIN compute droplet list | grep "$DROPLET_TAG" | awk '{ print $1 }');
-        if [ ! -z $droplet_id ] && [ ! -z $NETWORK_FLOATINGIP ]; then
-		log "Attaching floating IP: $NETWORK_FLOATINGIP to Droplet: $droplet_id"
-        	$DO_BIN compute floating-ip-action assign $NETWORK_FLOATINGIP $droplet_id;
-	else
-		log "Droplet and Floating IP must exist!"
-	fi
-	
-}
+# droplet_ssh "[command to execute]"
+function droplet_ssh() {
+local args=(compute ssh $DROPLET_HOSTNAME --ssh-port $DROPLET_SSH_PORT --ssh-user $DROPLET_SSH_USER --ssh-key-path $DROPLET_SSH_KEY_PATH)
 
-function execute_command {
-	log "Executing \""$2"\" on $1"
+# Check for parameters to determine whether SSH or execute remote SSH command
+if [[ $# -eq 0 ]]; then
+	log "Connecting to $DROPLET_HOSTNAME"
 	trap - SIGINT
-	$DO_BIN compute ssh "$1" --ssh-port $DROPLET_SSH_PORT --ssh-user $DROPLET_SSH_USER --ssh-key-path $DROPLET_SSH_KEY_PATH --ssh-command "$2" || { log "Error in SSH: $?"; trap ' ' SIGINT; return 1; }
+	$DO_BIN "${args[@]}" || { log "Error in SSH to $DROPLET_HOSTNAME"; trap ' ' SIGINT; return 1; }
 	trap ' ' SIGINT; 
+elif [[ $# -eq 1 && ${1:-} ]]; then
+	log "Executing \""$1"\" on $DROPLET_HOSTNAME"
+	args+=(--ssh-command $1)
+	trap - SIGINT
+	$DO_BIN "${args[@]}" || { log "Error $? in SSH command: $1"; trap ' ' SIGINT; return 1; }
+	trap ' ' SIGINT; 
+fi
 }
+
+
+# Usage: droplet_sshBatch "<file>" "[environment]"
+function droplet_sshBatch() {
+local args=(compute ssh $DROPLET_HOSTNAME --ssh-port $DROPLET_SSH_PORT --ssh-user $DROPLET_SSH_USER --ssh-key-path $DROPLET_SSH_KEY_PATH)
+
+# Check for parameters
+[[ ! -f ${1:-} ]] && log "Error: SSH batch file doesn't exist"
+[[ $# -eq 1 ]] && args+=(--ssh-command "sudo bash -s" -- ) 
+[[ $# -eq 2 && ! -z ${2:-} ]] && args+=(--ssh-command "sudo $2 bash -s" -- ) 
+
+# Execute SSH batch file
+trap - SIGINT
+$DO_BIN "${args[@]}" < $1 || { log "Error in SSH: $?"; trap ' ' SIGINT; return 0; }
+trap ' ' SIGINT; 
+
+}
+
 
 function show_help {
 echo "Usage: "
@@ -267,44 +290,59 @@ local firewall_id=""
 	$DO_BIN compute firewall add-droplets $firewall_id --droplet-ids $droplet_id || { log "Error attaching firewall!"; return 0; }
 }
 
-#Install Mailcow
-function mailcow_install {
-local root_dir=""
-root_dir=$(echo "$DROPLET_TAG-vol" | sed -e 's/-/_/g')	
+# Install Mailcow
+function mailcow_install() {
+local mnt_dir=""
+local scriptenv=""
 
-	execute_command $DROPLET_HOSTNAME 'sudo bash -s' <<EOF
-		export MAILCOW_HOSTNAME=$DROPLET_HOSTNAME
-		export MAILCOW_TZ=$MAILCOW_TZ
-		umask 0022
-		whoami && umask
-		rm -rf /opt/mailcow*
-		cd /opt
-		git clone https://github.com/mailcow/mailcow-dockerized
-		cd mailcow-dockerized
-		./generate_config.sh 
-		if [[ -f /mnt/$root_dir/mailcow.conf ]]; then mv ./mailcow.conf ./mailcow.bak; cp /mnt/$root_dir/mailcow.conf .; else cp mailcow.conf /mnt/$root_dir/; fi
-		echo '{  "data-root": "/mnt/$root_dir/docker" }' | sudo tee /etc/docker/daemon.json
-		sudo systemctl restart docker
-		exit 0
-EOF
+# Setup remote environment
+mnt_dir=$(echo "$DROPLET_TAG-vol" | sed -e 's/-/_/g')	
+scriptenv="DROPLET_HOSTNAME=$DROPLET_HOSTNAME MAILCOW_TZ=$MAILCOW_TZ mnt_dir=$mnt_dir"
+
+# Remotely execute install script
+droplet_sshBatch "$SCRIPT_MAILCOW" "$scriptenv" ||  { log "Error installing mailcow!"; return 0; };
 }
 
-function mailcow_start {
-	execute_command $DROPLET_HOSTNAME 'sudo bash -s' <<EOF
-        cd /opt/mailcow-dockerized/
-	pwd
-	docker-compose pull
-	docker-compose up -d
-EOF
+function mailcow_start() {
+log "Starting Mailcow.."
+droplet_ssh "cd /opt/mailcow-dockerized/ && sudo docker-compose pull && sudo docker-compose up -d" ||  { log "Error starting mailcow!"; return 0; };
+droplet_ssh "cd /opt/mailcow-dockerized/ && sudo docker-compose logs -f --tail=100" ||  { log "Error viewing mailcow logs!"; return 0; };
 }
 
 
-function mailcow_stop {
-	log "Stopping Mailcow.."
-	execute_command $DROPLET_HOSTNAME 'cd /opt/mailcow-dockerized/ && sudo docker-compose down' 
+function mailcow_stop() {
+log "Stopping Mailcow.."
+droplet_ssh "cd /opt/mailcow-dockerized/ && sudo docker-compose down" ||  { log "Error stopping mailcow!"; return 0; };
 }
 
-function menu_manageDroplet {
+function mailcow_update() {
+log "Updating Mailcow.."
+droplet_ssh "cd /opt/mailcow-dockerized/ && sudo ./update.sh --check" ||  { log "Error checking for mailcow updates!"; return 0; };
+confirm "Are you sure you would like to update mailcow? [y/N] " && { droplet_ssh "cd /opt/mailcow-dockerized/ && sudo ./update.sh --ours" ||  { log "Error updating mailcow!"; return 0; }; };
+}
+
+function mailcow_logs() {
+log "Viewing Mailcow logs.."
+droplet_ssh "cd /opt/mailcow-dockerized/ && sudo docker-compose logs -f --tail=100" ||  { log "Error viewing mailcow logs!"; return 0; };
+}
+
+
+function confirm() {
+local response=""
+
+# Call with a prompt string or use a default
+read -r -p "${1:-Are you sure? [y/N]} " response
+
+# Check response is yes and return true
+if [[ "$response" =~ ^([yY][eE][sS]|[yY])+$ ]]
+then
+	true
+else
+	false
+fi
+}
+
+function menu_manageDroplet() {
 local choice=""
 local droplet_id=""
 local volume_id=""
@@ -318,24 +356,24 @@ while [ "$choice" != x ]; do
         echo "2.  Destroy Droplet 		- Destroy mailcow Droplet"
         echo "3.  Detach Volume		- Remove Volume from Droplet"
         echo "4.  Start Droplet 		- Power on Droplet"
-        echo "5.  Reboot Droplet 		- Reboot Droplet"
-        echo "6.  Update Droplet		- Create 10G Volume"
-        echo "8.  Attach Floating IP		- Attach Floating IP to Droplet"
+        echo "5.  Stop Droplet 		- Power off Droplet"
+        echo "6.  Reboot Droplet 		- Reboot Droplet"
+        echo "7.  Rebuild Droplet 		- Rebuild Droplet"
+        echo "8.  Update Droplet		- Update Droplet"
         echo "9.  SSH to Droplet   		- SSH to Droplet"
         echo "x.  Exit"
         echo ""
         read -p "Enter choice [ 0 - 11 ] " choice
         case $choice in
-                1) 	droplet_list; pause ;;
-                2) 	droplet_delete "$DROPLET_TAG"; pause ;;
-                3) 	volume_detach; pause ;;
-		4)	$DO_BIN compute droplet-action power-on --wait $($DO_BIN compute droplet list | grep "$DROPLET_TAG" | awk '{ print $1 }'); pause ;;
-		5)	$DO_BIN compute droplet-action reboot --wait $($DO_BIN compute droplet list | grep "$DROPLET_TAG" | awk '{ print $1 }'); pause ;;
-                8) 	floatingip_attach; pause ;;
-                9) 
-			log "SSH to Droplet: $DROPLET_HOSTNAME";
-			$DO_BIN compute ssh $DROPLET_HOSTNAME --ssh-port $DROPLET_SSH_PORT --ssh-user $DROPLET_SSH_USER --ssh-key-path $DROPLET_SSH_KEY_PATH && echo "OK" || echo "Error";
-			pause ;;
+                1) droplet_list; pause ;;
+                2) droplet_delete "$DROPLET_TAG"; pause ;;
+                3) volume_detach; pause ;;
+		4) droplet_on "$($DO_BIN compute droplet list | grep "$DROPLET_TAG" | awk '{ print $1 }')"; pause ;;
+		5) droplet_off "$($DO_BIN compute droplet list | grep "$DROPLET_TAG" | awk '{ print $1 }')"; pause ;;
+		6) droplet_reboot "$($DO_BIN compute droplet list | grep "$DROPLET_TAG" | awk '{ print $1 }')"; pause ;;
+		7) droplet_rebuild "$($DO_BIN compute droplet list | grep "$DROPLET_TAG" | awk '{ print $1 }')"; pause ;;
+		8) droplet_update "$($DO_BIN compute droplet list | grep "$DROPLET_TAG" | awk '{ print $1 }')"; pause ;;
+                9) droplet_ssh; pause ;;
                 x) return 0;;
                 *) echo -e "${RED}Error...${STD}" && sleep 1
         esac
@@ -344,7 +382,7 @@ done
 
 
 
-function menu_manageMailcow {
+function menu_manageMailcow() {
 local choice=""
 
 while [ "$choice" != x ]; do 
@@ -362,11 +400,11 @@ while [ "$choice" != x ]; do
         read -p "Enter choice [ 0 - 5 ] " choice
         case $choice in
                 1) mailcow_install; pause ;;
-                2) mailcow_start; execute_command $DROPLET_HOSTNAME 'cd /opt/mailcow-dockerized/ && sudo docker-compose logs -f --tail=100'; pause ;;
+                2) mailcow_start; pause ;;
                 3) mailcow_stop; pause ;;
                 4) pause ;;
                 5) pause ;;
-                6) execute_command $DROPLET_HOSTNAME 'cd /opt/mailcow-dockerized/ && sudo ./update.sh --check'; pause ; execute_command $DROPLET_HOSTNAME 'cd /opt/mailcow-dockerized/ && sudo ./update.sh --ours';;
+                6) mailcow_update; pause ;;
                 x) return 0;;
                 *) echo -e "${RED}Error...${STD}" && sleep 1
         esac
@@ -375,7 +413,7 @@ done
 }
 
 
-function menu_monitor {
+function menu_monitor() {
 local choice=""
 
 while [ "$choice" != x ]; do 
@@ -388,8 +426,8 @@ while [ "$choice" != x ]; do
         echo "x.  Exit"
         read -p "Enter choice [ 0 - 5 ] " choice
         case $choice in
-                1) execute_command $DROPLET_HOSTNAME 'cd /opt/mailcow-dockerized/ && sudo docker-compose logs -f --tail=100' || { log "Error connecting to Droplet!"; return 0; }; pause ;;
-                2) pause ;;
+                1) mailcow_logs; pause ;;
+                2) droplet_ssh "sudo less /var/log/cloud-init-output*"; pause ;;
                 x) return 0;;
                 *) echo -e "${RED}Error...${STD}" && sleep 1
         esac
@@ -399,7 +437,7 @@ done
 
 
 # Function to display Deploy menu
-function menu_deploy {
+function menu_deploy() {
 local choice=""
 
 while [ "$choice" != x ]; do 
@@ -430,7 +468,7 @@ done
 
 
 # Function to display main menu
-function menu_main {
+function menu_main() {
 local choice=""
 
 while [ 1 ]; do 
@@ -449,6 +487,11 @@ while [ 1 ]; do
                 2) menu_manageDroplet ;;
                 3) menu_manageMailcow ;;
                 4) menu_monitor ;;
+                5) droplet_ssh; pause ;;
+                6) droplet_sshBatch "t1"; pause ;;
+                7) show_help; pause ;;
+                #5) ssh_login "\"bash -s\" -- < t1"; pause ;;
+                #5) ssh_login ; pause ;;
                 x) exit 0;;
                 *) echo -e "${RED}Error...${STD}" && sleep 1
         esac
@@ -458,15 +501,11 @@ done
 
 
 
-# ----------------------------------------------
-# Section: Trap CTRL+C, CTRL+Z and quit singles
-# ----------------------------------------------
-trap '' SIGINT SIGQUIT SIGTSTP
+########################
+### SCRIPT MAIN LOOP ###
+########################
 
-# -----------------------------------
-# Section: Main logic - infinite loop
-# ------------------------------------
-
+# Read command line parameters
 while getopts "hd" opt; do
     case "$opt" in
     h|\?)
@@ -478,8 +517,10 @@ while getopts "hd" opt; do
         esac
 done
 
-# Load global variables and main menu
+# Load global variables
 read_env_conf
+
+# Load main menu
 menu_main
 
 exit 0
