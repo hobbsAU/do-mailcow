@@ -176,12 +176,29 @@ droplet_ssh "sudo apt-get update && sudo apt-get -y upgrade && sudo apt-get -y d
 }
 
 
+function droplet_configure() {
+
+log "Creating Backup Disk"
+droplet_sshBatch "$SCRIPT_CONFIG" "MAILCOW_BACKUP_DIR=$MAILCOW_BACKUP_DIR MAILCOW_BACKUP_FILE=$MAILCOW_BACKUP_FILE MAILCOW_VOLUME_SIZE=$MAILCOW_VOLUME_SIZE" "BackupDisk_create" && { log "Backup Disk created successfully."; } || { log "Error creating backup disk!"; return 0; } 
+
+log "Attaching Volume"
+volume_attach && { log "Volume attached successfully."; } || { log "Error attaching volume!"; return 0; }; 
+
+log "Installing Docker"
+droplet_sshBatch "$SCRIPT_CONFIG" "" "Docker_install"  && { log "Docker installed successfully."; } || { log "Error installing Docker!"; return 0; }          
+
+log "Attaching Firewall"
+firewall_attach && { log "Firewall installed successfully."; } || { log "Error installing Firewall!"; return 0; }; 
+
+}
+
+
 function volume_attach {
 local droplet_id=""
 local volume_id=""
 
 # Check for droplet and volume
-droplet_id=$($DO_BIN compute droplet list | grep "$DROPLET_TAG" | awk '{ print $1 }') || { log "Droplet must exist"; return 0; }
+droplet_id=$($DO_BIN compute droplet list | grep "$DROPLET_TAG" | awk '{ print $1 }') || { log "Droplet must exist"; return 1; }
 volume_id=$($DO_BIN compute volume list | grep "$MAILCOW_VOLUME" | awk '{ print $1 }') || { 
 	log "Volume doesn't exist"; 
 	# Create new volume if necessary
@@ -192,15 +209,15 @@ volume_id=$($DO_BIN compute volume list | grep "$MAILCOW_VOLUME" | awk '{ print 
 	fi }
 
 # Check droplet is on
-[[ $($DO_BIN compute droplet list | grep "$DROPLET_TAG" | awk '{ print $11 }') == "active" ]] || { log "Droplet must be powered on"; return 0; }
+[[ $($DO_BIN compute droplet list | grep "$DROPLET_TAG" | awk '{ print $11 }') == "active" ]] || { log "Droplet must be powered on"; return 1; }
 
 # Attach volume	
 if [ ! -z $droplet_id ] && [ ! -z $volume_id ]; then
 	log "Attaching Volume: $volume_id to Droplet: $droplet_id"
-	$DO_BIN compute volume-action attach $volume_id $droplet_id && log "Volume successfully attached" || { log "Problem attaching volume!"; return 0; }
+	$DO_BIN compute volume-action attach $volume_id $droplet_id && log "Volume successfully attached" || { log "Problem attaching volume!"; return 1; }
 	
 	# Workaround DO Bug in automount on Debian 9.6
-	droplet_sshBatch "$SCRIPT_CONFIG" "MAILCOW_VOLUME=$MAILCOW_VOLUME" "Volume_mount" && log "Volume successfully mounted" ||  { log "Problem creating mount!"; return 0; };
+	droplet_sshBatch "$SCRIPT_CONFIG" "MAILCOW_VOLUME=$MAILCOW_VOLUME" "Volume_mount" && log "Volume successfully mounted" ||  { log "Problem creating mount!"; return 1; };
 else
 	log "Droplet and Volume must exist!"; 
 	return 1;
@@ -293,15 +310,10 @@ local firewall_id=""
 
 # Install Mailcow
 function mailcow_install() {
-local mnt_dir=""
-local scriptenv=""
-
-# Setup remote environment
-mnt_dir=$(echo "$MAILCOW_VOLUME" | sed -e 's/-/_/g')	
-scriptenv="DROPLET_HOSTNAME=$DROPLET_HOSTNAME MAILCOW_TZ=$MAILCOW_TZ mnt_dir=$mnt_dir"
 
 # Remotely execute install script
-droplet_sshBatch "$SCRIPT_MAILCOW" "$scriptenv" ||  { log "Error installing mailcow!"; return 0; };
+droplet_sshBatch "$SCRIPT_CONFIG" "export MAILCOW_HOSTNAME=$DROPLET_HOSTNAME MAILCOW_TZ=$MAILCOW_TZ MAILCOW_VOLUME=$MAILCOW_VOLUME" "Mailcow_install" ||  { log "Error installing mailcow!"; return 0; };
+
 }
 
 function mailcow_start() {
@@ -329,9 +341,13 @@ droplet_ssh "cd /opt/mailcow-dockerized/ && sudo docker-compose logs -f --tail=1
 
 function mailcow_backup() {
 log "Backing up mailcow config"
-
+droplet_ssh "sudo MAILCOW_BACKUP_LOCATION=$MAILCOW_BACKUP_DIR /opt/mailcow-dockerized/helper-scripts/backup_and_restore.sh backup all"
 }
 
+function docker_prune() {
+log "Pruning unused containers.."
+droplet_ssh "sudo docker system prune -f"
+}
 
 function confirm() {
 local response=""
@@ -360,9 +376,9 @@ while [ "$choice" != x ]; do
         echo "~~~~~~~~~~~~~~~~~~~~~~~~~"
         echo "1.  List Droplets		- List Droplets"
         echo "2.  Destroy Droplet 		- Destroy mailcow Droplet"
-        echo "3.  Detach Volume		- Remove Volume from Droplet"
-        echo "4.  Start Droplet 		- Power on Droplet"
-        echo "5.  Stop Droplet 		- Power off Droplet"
+        echo "3.  Attach Volume		- Attach Volume to Droplet, create if it does not exist"
+        echo "4.  Detach Volume		- Remove Volume from Droplet"
+        echo "5.  Start/Stop Droplet 		- Power On or Off Droplet"
         echo "6.  Reboot Droplet 		- Reboot Droplet"
         echo "7.  Rebuild Droplet 		- Rebuild Droplet"
         echo "8.  Update Droplet		- Update Droplet"
@@ -373,9 +389,9 @@ while [ "$choice" != x ]; do
         case $choice in
                 1) droplet_list; pause ;;
                 2) droplet_delete "$DROPLET_TAG"; pause ;;
-                3) volume_detach; pause ;;
-		4) droplet_on "$($DO_BIN compute droplet list | grep "$DROPLET_TAG" | awk '{ print $1 }')"; pause ;;
-		5) droplet_off "$($DO_BIN compute droplet list | grep "$DROPLET_TAG" | awk '{ print $1 }')"; pause ;;
+                3) volume_attach; pause ;;
+                4) volume_detach; pause ;;
+		5) droplet_power "$($DO_BIN compute droplet list | grep "$DROPLET_TAG" | awk '{ print $1 }')"; pause ;;
 		6) droplet_reboot "$($DO_BIN compute droplet list | grep "$DROPLET_TAG" | awk '{ print $1 }')"; pause ;;
 		7) droplet_rebuild "$($DO_BIN compute droplet list | grep "$DROPLET_TAG" | awk '{ print $1 }')"; pause ;;
 		8) droplet_update "$($DO_BIN compute droplet list | grep "$DROPLET_TAG" | awk '{ print $1 }')"; pause ;;
@@ -402,15 +418,17 @@ while [ "$choice" != x ]; do
         echo "4.  Mailcow Backup Config		- Mailcow config backup"
         echo "5.  Mailcow Backup Data		- Mailcow maildir backup"
         echo "6.  Mailcow Update			- Update Mailcow"
+        echo "7.  Docker Prune			- Prune unused Docker containers"
         echo "x.  Exit"
         read -p "Enter choice [ 0 - 5 ] " choice
         case $choice in
                 1) mailcow_install; pause ;;
                 2) mailcow_start; pause ;;
                 3) mailcow_stop; pause ;;
-                4) pause ;;
+                4) mailcow_backup; pause ;;
                 5) pause ;;
                 6) mailcow_update; pause ;;
+                7) docker_prune; pause ;;
                 x) return 0;;
                 *) echo -e "${RED}Error...${STD}" && sleep 1
         esac
@@ -453,24 +471,13 @@ while [ "$choice" != x ]; do
         echo "~~~~~~~~~~~~~~~~~~~~~~~~~"
         echo "1.  Create Droplet 		- Create and configure mailcow Droplet"
         echo "2.  Configure Droplet		- Configure and Secure Droplet"
-        echo "3.  Attach Volume		- Attach Volume to Droplet, create if it does not exist"
-        echo "4.  Install Mailcow 		- Create and configure mailcow Droplet"
+        echo "3.  Install Mailcow 		- Create and configure mailcow Droplet"
         echo "x.  Exit"
         read -p "Enter choice [ 0 - 5 ] " choice
         case $choice in
 		1) droplet_create "$DROPLET_HOSTNAME" "$DROPLET_SIZE" "$DROPLET_IMAGE" "$DROPLET_REGION" "$DROPLET_SSHKEY" "$DROPLET_TAG"; pause ;;
-                2) 
-		   	log "Creating Backup Disk"
-			droplet_sshBatch "$SCRIPT_CONFIG" "MAILCOW_BACKUP_DIR=$MAILCOW_BACKUP_DIR MAILCOW_BACKUP_FILE=$MAILCOW_BACKUP_FILE MAILCOW_VOLUME_SIZE=$MAILCOW_VOLUME_SIZE" "BackupDisk_create"; 
-		   	log "Installing Docker"
-			droplet_sshBatch "$SCRIPT_CONFIG" "" "Docker_install"; 
-		   	log "Attaching Volume"
-			volume_attach; 
-		   	log "Attaching Firewall"
-			firewall_attach; 
-		   pause ;;
-                3) volume_attach; pause ;;
-                4) mailcow_install; pause ;;
+                2) droplet_configure; pause ;;
+                3) mailcow_install; pause ;;
                 5) pause ;;
                 x) return 0;;
                 *) echo -e "${RED}Error...${STD}" && sleep 1

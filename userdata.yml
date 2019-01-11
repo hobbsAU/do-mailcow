@@ -36,7 +36,7 @@ runcmd:
   - echo $PUBLIC_IPV4
 
 power_state:
- delay: "+1"
+# delay: "+1"
  mode: reboot
  message: Bye Bye
  timeout: 30

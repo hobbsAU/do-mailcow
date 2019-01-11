@@ -118,10 +118,32 @@ systemctl start mnt-$mnt_dir.mount
 
 
 
-function deploy_vpn() {
-    git clone https://github.com/jmarhee/dockvpn.git && \
-    cd dockvpn && \
-    docker-compose up -d
+function Mailcow_install() {
+local mnt_dir=$(echo "$MAILCOW_VOLUME" | sed -e 's/-/_/g')
+
+# Set umask
+umask 0022
+
+# Remove any previous installation
+rm -rf /opt/mailcow-dockerized
+
+# Clone mailcow repo
+git clone https://github.com/mailcow/mailcow-dockerized /opt/mailcow-dockerized
+cd /opt/mailcow-dockerized && ./generate_config.sh 
+
+# Check for previous config and restore otherwise backup new config required for DB credentials
+if [[ -f /mnt/$mnt_dir/mailcow.conf ]]; then 
+	mv ./mailcow.conf ./mailcow.bak; 
+	cp /mnt/$mnt_dir/mailcow.conf .; 
+else 
+	cp mailcow.conf /mnt/$mnt_dir/; 
+fi
+
+# Update Docker storage location
+echo -e "{  \"data-root\": \"/mnt/$mnt_dir/docker\" }" | sudo tee /etc/docker/daemon.json
+systemctl restart docker
+exit 0
+
 }
 
 
