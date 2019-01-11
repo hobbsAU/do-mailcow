@@ -1,0 +1,136 @@
+#!/bin/bash
+set -euo pipefail
+set -x
+
+########################
+### SCRIPT VARIABLES ###
+########################
+
+
+
+
+
+########################
+### SCRIPT FUNCTIONS ###
+########################
+
+function BackupDisk_create() {
+local mnt_dir=""
+mnt_dir=$(echo "$MAILCOW_BACKUP_DIR" |sed -e "s/^\///; s/\/$//; s/\//-/g;")
+
+# Check environment 
+[[ "${MAILCOW_BACKUP_DIR:-}" && "${MAILCOW_BACKUP_FILE:-}" && "${MAILCOW_VOLUME_SIZE:-}" ]] || { echo "Variable not set"; exit 1; }
+
+# Test for backup mount
+[[ ! -d "$MAILCOW_BACKUP_DIR" ]] && mkdir -p $MAILCOW_BACKUP_DIR
+
+# Test for backup disk
+if [[ ! -f "$MAILCOW_BACKUP_FILE" ]]; then
+	# Create disk
+	dd if=/dev/zero of=$MAILCOW_BACKUP_FILE bs=1G count=${MAILCOW_VOLUME_SIZE%%[^0-9]*}
+
+	# Format Disk
+	mkfs.ext4 $MAILCOW_BACKUP_FILE
+	# Create backup disk if there is enough free space
+	# [[ "$(du -s /home/ | awk '{ print $1 }')" -lt "$(df |grep sda2 |awk '{ print $2 }')" ]] && echo "true" || echo "false"
+
+	# Mount disk
+	#mount -o loop,noexec,nosuid,rw $MAILCOW_BACKUP_FILE $MAILCOW_BACKUP_DIR
+else
+	echo "Backup disk exists"
+fi
+
+#Install mount script
+if [[ ! -f "/etc/systemd/system/$mnt_dir.mount" ]]; then
+echo "[Unit]
+Description=Mount Backup Volume $MAILCOW_BACKUP_FILE
+
+[Mount]
+What=$MAILCOW_BACKUP_FILE
+Where=$MAILCOW_BACKUP_DIR
+Options=defaults,loop,noexec,nosuid,nofail,noatime,rw
+Type=ext4
+
+[Install]
+WantedBy = multi-user.target" | tee /etc/systemd/system/$mnt_dir.mount
+systemctl daemon-reload
+systemctl enable $mnt_dir.mount
+else
+	echo "Mount script exists"
+fi
+
+systemctl start $mnt_dir.mount
+
+}
+
+function Packages_install() {
+
+echo "installing $1"
+    apt-get update 
+    apt-get install -y ${1}
+    apt-get -y autoremove
+}
+
+function Docker_install() {
+local packages="apt-transport-https ca-certificates curl gnupg2 software-properties-common"
+
+# Install package dependencies
+Packages_install "$packages"
+
+# Install Docker
+curl -fsSL https://download.docker.com/linux/debian/gpg | apt-key add -
+add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/debian $(lsb_release -cs) stable"
+apt-get update
+apt-cache policy docker-ce
+apt-get install -y docker-ce
+systemctl status docker
+docker info
+
+# Install Compose
+curl -L "https://github.com/docker/compose/releases/download/$(curl -Ls https://www.servercow.de/docker-compose/latest.php)/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose && \
+chmod +x /usr/local/bin/docker-compose
+
+}
+
+function Volume_mount() {
+local mnt_dir=""
+mnt_dir=$(echo "$MAILCOW_VOLUME" | sed -e 's/-/_/g')
+
+if [[ ! -f "/etc/systemd/system/mnt-$mnt_dir.mount" ]]; then
+echo "[Unit]
+Description=Mount DO Volume $MAILCOW_VOLUME
+
+[Mount]
+What=/dev/disk/by-id/scsi-0DO_Volume_$MAILCOW_VOLUME
+Where=/mnt/$mnt_dir
+Options=defaults,nofail,discard,noatime
+Type=ext4
+
+[Install]
+WantedBy = multi-user.target" | tee /etc/systemd/system/mnt-$mnt_dir.mount
+systemctl daemon-reload
+systemctl enable mnt-$mnt_dir.mount
+fi
+
+systemctl start mnt-$mnt_dir.mount
+
+}
+
+
+
+function deploy_vpn() {
+    git clone https://github.com/jmarhee/dockvpn.git && \
+    cd dockvpn && \
+    docker-compose up -d
+}
+
+
+####################
+### SCRIPT LOGIC ###
+####################
+
+# Check config for borg and enable
+
+# Check config for local backup and enable
+
+

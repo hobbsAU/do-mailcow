@@ -114,10 +114,12 @@ fi
 $DO_BIN "${parms[@]}" && {
 log "Created Droplet, updating DNS..";
 $DO_BIN compute domain records update $domain --record-ttl 60 --record-name $host --record-id $($DO_BIN compute domain records list $domain |grep "$host " |awk '{ print $1 }') --record-data $($DO_BIN compute droplet list | grep "$DROPLET_TAG" | awk '{ print $3 }') || { log "Error updating DNS!"; return 0; };
-# Wait for reboot.
+sleep 10
+
+# Wait for cloud-init to complete.
 until droplet_ssh 'last';  do
-log "Waiting for Droplet reboot.."
-sleep 30
+clear && log "Waiting for Droplet SSH daemon.."
+sleep 10
 done
 } || { log "Error creating Droplet!"; return 0; }
 
@@ -177,18 +179,16 @@ droplet_ssh "sudo apt-get update && sudo apt-get -y upgrade && sudo apt-get -y d
 function volume_attach {
 local droplet_id=""
 local volume_id=""
-local mnt_dir=""
-mnt_dir=$(echo "$DROPLET_TAG-vol" | sed -e 's/-/_/g')	
 
 # Check for droplet and volume
 droplet_id=$($DO_BIN compute droplet list | grep "$DROPLET_TAG" | awk '{ print $1 }') || { log "Droplet must exist"; return 0; }
-volume_id=$($DO_BIN compute volume list | grep "$DROPLET_TAG-vol" | awk '{ print $1 }') || { 
+volume_id=$($DO_BIN compute volume list | grep "$MAILCOW_VOLUME" | awk '{ print $1 }') || { 
 	log "Volume doesn't exist"; 
 	# Create new volume if necessary
 	if [ -z $volume_id ]; then
 		log "Creating new volume..";
 		volume_create;
-		volume_id=$($DO_BIN compute volume list | grep "$DROPLET_TAG-vol" | awk '{ print $1 }');
+		volume_id=$($DO_BIN compute volume list | grep "$MAILCOW_VOLUME" | awk '{ print $1 }');
 	fi }
 
 # Check droplet is on
@@ -200,10 +200,7 @@ if [ ! -z $droplet_id ] && [ ! -z $volume_id ]; then
 	$DO_BIN compute volume-action attach $volume_id $droplet_id && log "Volume successfully attached" || { log "Problem attaching volume!"; return 0; }
 	
 	# Workaround DO Bug in automount on Debian 9.6
-	scriptenv="DROPLET_TAG=$DROPLET_TAG MNT_DIR=$mnt_dir"
-	droplet_sshBatch "$SCRIPT_VOLUME" "$scriptenv" ||  { log "Problem creating mount!"; return 0; };
-	$DO_BIN compute droplet-action reboot --wait $droplet_id && { log "Droplet successfully rebooted"; return 0; } || { log "Problem rebooting Droplet!"; return 0; }
-
+	droplet_sshBatch "$SCRIPT_CONFIG" "MAILCOW_VOLUME=$MAILCOW_VOLUME" "Volume_mount" && log "Volume successfully mounted" ||  { log "Problem creating mount!"; return 0; };
 else
 	log "Droplet and Volume must exist!"; 
 	return 1;
@@ -217,7 +214,7 @@ local droplet_id=""
 local volume_id=""
 
 droplet_id=$($DO_BIN compute droplet list | grep "$DROPLET_TAG" | awk '{ print $1 }');
-volume_id=$($DO_BIN compute volume list | grep "$DROPLET_TAG-vol" | awk '{ print $1 }');
+volume_id=$($DO_BIN compute volume list | grep "$MAILCOW_VOLUME" | awk '{ print $1 }');
 
 # If Droplet and Volume exists then Detach volume
         if [ ! -z $droplet_id ] && [ ! -z $volume_id ]; then
@@ -234,7 +231,7 @@ function volume_create {
 
 # Create volume
 log "Creating volume.."
-$DO_BIN compute volume create $DROPLET_TAG-vol --fs-type ext4 --region $DROPLET_REGION --size 10GiB || { log "Problem creating volume!"; return 0; }
+$DO_BIN compute volume create $MAILCOW_VOLUME --fs-type ext4 --region $DROPLET_REGION --size $MAILCOW_VOLUME_SIZE || { log "Problem creating volume!"; return 0; }
 
 }
 
@@ -261,16 +258,14 @@ fi
 
 # Usage: droplet_sshBatch "<file>" "[environment]"
 function droplet_sshBatch() {
-local args=(compute ssh $DROPLET_HOSTNAME --ssh-port $DROPLET_SSH_PORT --ssh-user $DROPLET_SSH_USER --ssh-key-path $DROPLET_SSH_KEY_PATH)
+local args=(compute ssh $DROPLET_HOSTNAME --ssh-port $DROPLET_SSH_PORT --ssh-user $DROPLET_SSH_USER --ssh-key-path $DROPLET_SSH_KEY_PATH --ssh-command "sudo bash -s" -- )
 
-# Check for parameters
-[[ ! -f ${1:-} ]] && log "Error: SSH batch file doesn't exist"
-[[ $# -eq 1 ]] && args+=(--ssh-command "sudo bash -s" -- ) 
-[[ $# -eq 2 && ! -z ${2:-} ]] && args+=(--ssh-command "sudo $2 bash -s" -- ) 
-
-# Execute SSH batch file
+# Check for parameters and execute script
 trap - SIGINT
-$DO_BIN "${args[@]}" < $1 || { log "Error in SSH: $?"; trap ' ' SIGINT; return 0; }
+[[ ! -f ${1:-} ]] && log "Error: SSH batch file doesn't exist"
+[[ $# -eq 1 ]] && { $DO_BIN "${args[@]}" < $1 || { log "Error in SSH: $?"; trap ' ' SIGINT; return 0; } }
+[[ $# -eq 2 && ! -z ${2:-} ]] && { $DO_BIN "${args[@]}" < <(echo ${2:-}; cat $1) || { log "Error in SSH: $?"; trap ' ' SIGINT; return 0; } }
+[[ $# -eq 3 && ! -z ${3:-} ]] && { $DO_BIN "${args[@]}" < <(echo ${2:-}; cat $1; echo $3) || { log "Error in SSH: $?"; trap ' ' SIGINT; return 0; } }
 trap ' ' SIGINT; 
 
 }
@@ -282,7 +277,7 @@ echo "Usage: "
 }
 
 
-function firewall_attach {
+function firewall_attach() {
 local droplet_id=""
 local firewall_id=""
 
@@ -290,7 +285,8 @@ local firewall_id=""
 	droplet_id=$($DO_BIN compute droplet list | grep "$DROPLET_TAG" | awk '{ print $1 }') || { log "Droplet must exist"; return 0; }
 	firewall_id=$($DO_BIN compute firewall list | grep "$NETWORK_FIREWALL" | awk '{ print $1 }') || { log "Firewall must exist"; return 0; }
 	log "Creating Firewall.."
-	$DO_BIN compute firewall update $firewall_id --inbound-rules "protocol:tcp,ports:25,address:0.0.0.0/0 protocol:tcp,ports:80,address:$WAN_IP/32 protocol:tcp,ports:110,address:0.0.0.0/0 protocol:tcp,ports:143,address:0.0.0.0/0 protocol:tcp,ports:443,address:$WAN_IP/32 protocol:tcp,ports:465,address:0.0.0.0/0 protocol:tcp,ports:587,address:0.0.0.0/0 protocol:tcp,ports:993,address:0.0.0.0/0 protocol:tcp,ports:995,address:0.0.0.0/0 protocol:tcp,ports:2222,address:0.0.0.0/0 protocol:tcp,ports:4190,address:0.0.0.0/0" --outbound-rules "protocol:tcp,ports:all,address:0.0.0.0/0,address:::/0 protocol:udp,ports:all,address:0.0.0.0/0,address:::/0" --name mailcow-prod-fw || { log "Error configuring firewall!"; return 0; }
+	$DO_BIN compute firewall update $firewall_id --inbound-rules "protocol:tcp,ports:25,address:0.0.0.0/0 protocol:tcp,ports:80,address:0.0.0.0/0 protocol:tcp,ports:110,address:0.0.0.0/0 protocol:tcp,ports:143,address:0.0.0.0/0 protocol:tcp,ports:443,address:0.0.0.0/0 protocol:tcp,ports:465,address:0.0.0.0/0 protocol:tcp,ports:587,address:0.0.0.0/0 protocol:tcp,ports:993,address:0.0.0.0/0 protocol:tcp,ports:995,address:0.0.0.0/0 protocol:tcp,ports:2222,address:0.0.0.0/0 protocol:tcp,ports:4190,address:0.0.0.0/0" --outbound-rules "protocol:tcp,ports:all,address:0.0.0.0/0,address:::/0 protocol:udp,ports:all,address:0.0.0.0/0,address:::/0" --name $NETWORK_FIREWALL || { log "Error configuring firewall!"; return 0; }
+	#$DO_BIN compute firewall update $firewall_id --inbound-rules "protocol:tcp,ports:25,address:0.0.0.0/0 protocol:tcp,ports:80,address:$WAN_IP/32 protocol:tcp,ports:110,address:0.0.0.0/0 protocol:tcp,ports:143,address:0.0.0.0/0 protocol:tcp,ports:443,address:$WAN_IP/32 protocol:tcp,ports:465,address:0.0.0.0/0 protocol:tcp,ports:587,address:0.0.0.0/0 protocol:tcp,ports:993,address:0.0.0.0/0 protocol:tcp,ports:995,address:0.0.0.0/0 protocol:tcp,ports:2222,address:0.0.0.0/0 protocol:tcp,ports:4190,address:0.0.0.0/0" --outbound-rules "protocol:tcp,ports:all,address:0.0.0.0/0,address:::/0 protocol:udp,ports:all,address:0.0.0.0/0,address:::/0" --name $NETWORK_FIREWALL || { log "Error configuring firewall!"; return 0; }
 	log "Attaching Firewall.."
 	$DO_BIN compute firewall add-droplets $firewall_id --droplet-ids $droplet_id || { log "Error attaching firewall!"; return 0; }
 }
@@ -301,7 +297,7 @@ local mnt_dir=""
 local scriptenv=""
 
 # Setup remote environment
-mnt_dir=$(echo "$DROPLET_TAG-vol" | sed -e 's/-/_/g')	
+mnt_dir=$(echo "$MAILCOW_VOLUME" | sed -e 's/-/_/g')	
 scriptenv="DROPLET_HOSTNAME=$DROPLET_HOSTNAME MAILCOW_TZ=$MAILCOW_TZ mnt_dir=$mnt_dir"
 
 # Remotely execute install script
@@ -329,6 +325,11 @@ confirm "Are you sure you would like to update mailcow? [y/N] " && { droplet_ssh
 function mailcow_logs() {
 log "Viewing Mailcow logs.."
 droplet_ssh "cd /opt/mailcow-dockerized/ && sudo docker-compose logs -f --tail=100" ||  { log "Error viewing mailcow logs!"; return 0; };
+}
+
+function mailcow_backup() {
+log "Backing up mailcow config"
+
 }
 
 
@@ -451,14 +452,23 @@ while [ "$choice" != x ]; do
         echo " D E P L O Y - M E N U"
         echo "~~~~~~~~~~~~~~~~~~~~~~~~~"
         echo "1.  Create Droplet 		- Create and configure mailcow Droplet"
-        echo "2.  Secure Droplet		- Configure Droplet Firewall"
+        echo "2.  Configure Droplet		- Configure and Secure Droplet"
         echo "3.  Attach Volume		- Attach Volume to Droplet, create if it does not exist"
         echo "4.  Install Mailcow 		- Create and configure mailcow Droplet"
         echo "x.  Exit"
         read -p "Enter choice [ 0 - 5 ] " choice
         case $choice in
 		1) droplet_create "$DROPLET_HOSTNAME" "$DROPLET_SIZE" "$DROPLET_IMAGE" "$DROPLET_REGION" "$DROPLET_SSHKEY" "$DROPLET_TAG"; pause ;;
-                2) firewall_attach; pause ;;
+                2) 
+		   	log "Creating Backup Disk"
+			droplet_sshBatch "$SCRIPT_CONFIG" "MAILCOW_BACKUP_DIR=$MAILCOW_BACKUP_DIR MAILCOW_BACKUP_FILE=$MAILCOW_BACKUP_FILE MAILCOW_VOLUME_SIZE=$MAILCOW_VOLUME_SIZE" "BackupDisk_create"; 
+		   	log "Installing Docker"
+			droplet_sshBatch "$SCRIPT_CONFIG" "" "Docker_install"; 
+		   	log "Attaching Volume"
+			volume_attach; 
+		   	log "Attaching Firewall"
+			firewall_attach; 
+		   pause ;;
                 3) volume_attach; pause ;;
                 4) mailcow_install; pause ;;
                 5) pause ;;
@@ -492,7 +502,9 @@ while [ 1 ]; do
                 2) menu_manageDroplet ;;
                 3) menu_manageMailcow ;;
                 4) menu_monitor ;;
-                5) droplet_ssh; pause ;;
+                5)	droplet_sshBatch "$SCRIPT_CONFIG" "" "Docker_install"; pause ;;
+		#5) droplet_sshBatch "script_Configure" "MAILCOW_BACKUP_DIR=$MAILCOW_BACKUP_DIR MAILCOW_BACKUP_FILE=$MAILCOW_BACKUP_FILE MAILCOW_VOLUME_SIZE=$MAILCOW_VOLUME_SIZE" "BackupDisk_create"; pause ;;
+                #5) droplet_sshBatch "script_Configure" "MAILCOW_BACKUP_DIR=$MAILCOW_BACKUP_DIR MAILCOW_BACKUP_FILE=$MAILCOW_BACKUP_FILE MAILCOW_VOLUME_SIZE=$MAILCOW_VOLUME_SIZE" "BackupDisk_create"; pause ;;
                 6) droplet_sshBatch "t1"; pause ;;
                 7) show_help; pause ;;
                 #5) ssh_login "\"bash -s\" -- < t1"; pause ;;
