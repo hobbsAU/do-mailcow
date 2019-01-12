@@ -140,10 +140,34 @@ else
 fi
 
 # Update Docker storage location
-echo -e "{  \"data-root\": \"/mnt/$mnt_dir/docker\" }" | sudo tee /etc/docker/daemon.json
+echo -e "{  \"data-root\": \"/mnt/$mnt_dir/docker\" }" | tee /etc/docker/daemon.json
 systemctl restart docker
 exit 0
 
+}
+
+
+function SSH_config() {
+usermod -p "*" $DROPLET_SSH_USER
+echo -e "Port $DROPLET_SSH_PORT
+Protocol 2
+KexAlgorithms curve25519-sha256@libssh.org
+HostKey /etc/ssh/ssh_host_ed25519_key
+Ciphers chacha20-poly1305@openssh.com
+MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com
+PermitRootLogin no
+StrictModes yes
+MaxAuthTries 3
+PubkeyAuthentication yes
+AuthorizedKeysFile	.ssh/authorized_keys
+HostbasedAuthentication no
+IgnoreRhosts yes
+PasswordAuthentication no
+PermitEmptyPasswords no
+ChallengeResponseAuthentication no
+UsePrivilegeSeparation sandbox
+AllowUsers $DROPLET_SSH_USER" | tee /etc/ssh/sshd_config
+systemctl restart sshd
 }
 
 

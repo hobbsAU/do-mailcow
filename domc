@@ -14,7 +14,7 @@ trap '' SIGINT SIGQUIT SIGTSTP
 
 # Set debug
 DEBUG=1
-#set -x
+set -x
 
 # Define command locations
 DO_BIN=/usr/bin/doctl
@@ -86,25 +86,75 @@ function debug() {
 	echo -e "${PURPLE}\n[$now] DEBUG: $1${STD}"
 }
 
+
+function generate_userdata() {
+cat <<EOF > $DROPLET_USERDATAFILE
+#cloud-config
+
+# Upgrade the instance on first boot (ie run apt-get upgrade)
+# Default: false
+# Aliases: apt_upgrade
+package_update: true
+package_upgrade: true
+
+# Install the following packages
+packages:
+  - ufw
+  - haveged
+
+# Setup user
+users:
+  - name: $DROPLET_SSH_USER
+    groups: sudo
+    shell: /bin/bash
+    sudo: ['ALL=(ALL) NOPASSWD:ALL']
+    ssh-authorized-keys:
+      - $DROPLET_SSH_AUTHORIZEDKEY
+
+runcmd:
+  - echo "y" | ufw enable
+  - ufw rule allow proto tcp to 0.0.0.0/0 port $DROPLET_SSH_PORT 
+  - ufw default deny incoming
+  - ufw default allow outgoing
+  - sed -i -e '/^#alias ll/s/^#//' /home/$DROPLET_SSH_USER/.bashrc
+  - sed -i -e '/^#Port/s/^.*$/Port $DROPLET_SSH_PORT/' /etc/ssh/sshd_config
+#  - systemctl restart sshd
+  - export HOSTNAME=\$(curl -s http://169.254.169.254/metadata/v1/hostname)
+  - echo \$HOSTNAME
+  - export PUBLIC_IPV4=\$(curl -s http://169.254.169.254/metadata/v1/interfaces/public/0/ipv4/address)
+  - echo \$PUBLIC_IPV4
+
+power_state:
+# delay: "+1"
+ mode: reboot
+ message: Bye Bye
+ timeout: 30
+ condition: True
+EOF
+}
+
 function droplet_create {
-local   parms=(compute droplet create $1 --wait --size $2 --image $3 --region $4 --ssh-keys $5 --tag-names $6)
+local   parms=(compute droplet create $DROPLET_HOSTNAME --wait --size $DROPLET_SIZE --image $DROPLET_IMAGE --region $DROPLET_REGION --ssh-keys $DROPLET_SSHKEY --tag-names $DROPLET_TAG)
 local	domain=${DROPLET_HOSTNAME#*.}
 local   host=${DROPLET_HOSTNAME%%.*}
 
+# Generate userdata file
+generate_userdata
+
 #Check if droplet exists with same tag
-if [[ ! -z $($DO_BIN compute droplet list | grep "$6" | awk '{ print $1 }') ]]; then
+if [[ ! -z $($DO_BIN compute droplet list | grep "$DROPLET_TAG" | awk '{ print $1 }') ]]; then
 	log "ERROR: Droplet already exists";
 	return 0;
 fi
 
 #Create Droplet
 log "Creating Droplet: $DROPLET_HOSTNAME in $DROPLET_REGION tagged with $DROPLET_TAG";
-if [ ! -z "$DROPLET_USERDATAFILE" ]; then
-	parms+=(--user-data-file $DROPLET_USERDATAFILE)
-fi
-
 if [ ! -z "$DROPLET_MONITORING" ] && [ $DROPLET_MONITORING = "true" ] ; then
 	parms+=(--enable-monitoring)
+fi
+
+if [ ! -z "$DROPLET_USERDATAFILE" ]; then
+	parms+=(--user-data-file $DROPLET_USERDATAFILE)
 fi
 
 if [ $DEBUG -eq "1" ]; then
@@ -189,6 +239,9 @@ droplet_sshBatch "$SCRIPT_CONFIG" "" "Docker_install"  && { log "Docker installe
 
 log "Attaching Firewall"
 firewall_attach && { log "Firewall installed successfully."; } || { log "Error installing Firewall!"; return 0; }; 
+
+log "Configuring SSH"
+droplet_sshBatch "$SCRIPT_CONFIG" "DROPLET_SSH_PORT=$DROPLET_SSH_PORT DROPLET_SSH_USER=$DROPLET_SSH_USER" "SSH_config"  && { log "SSH configured successfully."; } || { log "Error configuring SSH!"; return 0; }          
 
 }
 
@@ -475,7 +528,7 @@ while [ "$choice" != x ]; do
         echo "x.  Exit"
         read -p "Enter choice [ 0 - 5 ] " choice
         case $choice in
-		1) droplet_create "$DROPLET_HOSTNAME" "$DROPLET_SIZE" "$DROPLET_IMAGE" "$DROPLET_REGION" "$DROPLET_SSHKEY" "$DROPLET_TAG"; pause ;;
+		1) droplet_create; pause ;;
                 2) droplet_configure; pause ;;
                 3) mailcow_install; pause ;;
                 5) pause ;;
@@ -509,13 +562,8 @@ while [ 1 ]; do
                 2) menu_manageDroplet ;;
                 3) menu_manageMailcow ;;
                 4) menu_monitor ;;
-                5)	droplet_sshBatch "$SCRIPT_CONFIG" "" "Docker_install"; pause ;;
-		#5) droplet_sshBatch "script_Configure" "MAILCOW_BACKUP_DIR=$MAILCOW_BACKUP_DIR MAILCOW_BACKUP_FILE=$MAILCOW_BACKUP_FILE MAILCOW_VOLUME_SIZE=$MAILCOW_VOLUME_SIZE" "BackupDisk_create"; pause ;;
-                #5) droplet_sshBatch "script_Configure" "MAILCOW_BACKUP_DIR=$MAILCOW_BACKUP_DIR MAILCOW_BACKUP_FILE=$MAILCOW_BACKUP_FILE MAILCOW_VOLUME_SIZE=$MAILCOW_VOLUME_SIZE" "BackupDisk_create"; pause ;;
                 6) droplet_sshBatch "t1"; pause ;;
                 7) show_help; pause ;;
-                #5) ssh_login "\"bash -s\" -- < t1"; pause ;;
-                #5) ssh_login ; pause ;;
                 x) exit 0;;
                 *) echo -e "${RED}Error...${STD}" && sleep 1
         esac
