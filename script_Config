@@ -1,6 +1,6 @@
 #!/bin/bash
 set -euo pipefail
-set -x
+#set -x
 
 ########################
 ### SCRIPT VARIABLES ###
@@ -55,11 +55,10 @@ Type=ext4
 WantedBy = multi-user.target" | tee /etc/systemd/system/$mnt_dir.mount
 systemctl daemon-reload
 systemctl enable $mnt_dir.mount
-else
-	echo "Mount script exists"
-fi
-
 systemctl start $mnt_dir.mount
+else
+	echo "Backup volume mount script exists"
+fi
 
 }
 
@@ -110,9 +109,8 @@ Type=ext4
 WantedBy = multi-user.target" | tee /etc/systemd/system/mnt-$mnt_dir.mount
 systemctl daemon-reload
 systemctl enable mnt-$mnt_dir.mount
-fi
-
 systemctl start mnt-$mnt_dir.mount
+fi
 
 }
 
@@ -169,6 +167,97 @@ UsePrivilegeSeparation sandbox
 AllowUsers $DROPLET_SSH_USER" | tee /etc/ssh/sshd_config
 systemctl restart sshd
 }
+
+
+function Borg_install() {
+## systemd, pre_hook for mailcow backup
+
+# Load variable
+local mnt_dir=$(echo "$MAILCOW_VOLUME" | sed -e 's/-/_/g')
+source /mnt/$mnt_dir/mailcow.conf
+CMPS_PRJ=$(echo $COMPOSE_PROJECT_NAME | tr -cd "[A-Za-z-_]")
+
+
+# install borgmatic
+docker pull monachus/borgmatic
+
+# install systemd
+
+# add config directory
+[[ ! -d "/etc/borgmatic" ]] && mkdir -p /etc/borgmatic
+[[ ! -d "~/.ssh" ]] && mkdir -p ~/.ssh
+
+
+# install borgmatic conf
+[[ ! -f "/etc/borgmatic/config.yaml" ]] && echo "Copying borgmatic config" || echo "Overwriting borgmatic config"
+echo -e "location:
+    source_directories:
+        - /vmail
+        - /mailcow
+
+    one_file_system: true
+    repositories:
+        - $BACKUP_REPO
+
+    exclude_patterns:
+        - 'dovecot-uidlist.lock'
+        - ~/*/.cache
+
+    exclude_caches: true
+    exclude_if_present: .nobackup
+
+storage:
+    #compression: auto,zstd
+    archive_name_format: '{hostname}-{now}'
+
+retention:
+    keep_daily: 3
+    keep_weekly: 4
+    keep_monthly: 12
+    keep_yearly: 2
+    prefix: '{hostname}-'
+
+consistency:
+    checks:
+        # uncomment to always do integrity checks. (takes long time for large repos)
+        - repository
+        #- disabled
+
+    check_last: 3
+    prefix: '{hostname}-'
+" | tee /etc/borgmatic/config.yaml
+
+# install repo key
+[[ ! -f "/etc/borgmatic/repokey" ]] && echo "Copying repo key" || echo "Overwriting repo key"
+echo -e "$BACKUP_REPOKEY" | tee /etc/borgmatic/repokey
+chmod 600 /etc/borgmatic/repokey
+
+#install ssh key
+[[ ! -f "~/.ssh/id_borg" ]] && echo "Copying ssh id" || echo "Overwriting ssh id"
+echo -e "$BACKUP_SSHID" | tee ~/.ssh/id_borg
+chmod 600 ~/.ssh/id_borg
+
+# install borg backup host keys and test
+local hostname="$(echo $BACKUP_HOSTID | awk '{ print $1 }')"
+local pubkey="$(echo $BACKUP_HOSTID | awk '{ print $3 }')"
+if [[ ! -f "~/.ssh/known_hosts" ]]; then
+ssh-keyscan -H $hostname | tee ~/.ssh/known_hosts
+else
+ssh-keyscan -H $hostname | tee -a ~/.ssh/known_hosts
+fi
+[[ $(ssh-keygen -F "$hostname" |grep "$pubkey") ]] && echo "Backup host authenticated" || { echo "Backup host authentication error"; exit 1; }
+
+
+# execute a backup
+docker run --rm -e BORG_PASSCOMMAND='cat /borgmatic/repokey' -e BORG_RSH='ssh -i /root/.ssh/id_borg' -v $(docker volume ls -qf name=${CMPS_PRJ}_vmail-vol-1):/vmail:ro -v $MAILCOW_BACKUP_DIR:/mailcow -v ~/.ssh:/root/.ssh -v /etc/borgmatic:/borgmatic:ro monachus/borgmatic --verbosity 1 -c /borgmatic/config.yaml
+
+# execute a test restore
+local archive="$(docker run --rm -e 'BORG_PASSCOMMAND=cat /borgmatic/repokey' -e 'BORG_RSH=ssh -i ~/.ssh/id_borg' -v ~/.ssh:/root/.ssh -v /etc/borgmatic:/borgmatic:ro monachus/borgmatic -c /borgmatic/config.yaml --list |tail -n 1 |awk '{ print $1 }')"
+docker run --rm -e 'BORG_PASSCOMMAND=cat /borgmatic/repokey' -e 'BORG_RSH=ssh -i ~/.ssh/id_borg' -v ~/.ssh:/root/.ssh -v /etc/borgmatic:/borgmatic:ro monachus/borgmatic borg extract --dry-run --list $BACKUP_REPO::$archive
+
+exit 0
+}
+
 
 
 ####################

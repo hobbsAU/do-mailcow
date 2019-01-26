@@ -13,8 +13,8 @@ trap '' SIGINT SIGQUIT SIGTSTP
 ########################
 
 # Set debug
-DEBUG=1
-set -x
+DEBUG=0
+#set -x
 
 # Define command locations
 DO_BIN=/usr/bin/doctl
@@ -28,7 +28,7 @@ PURPLE="\033[0;35m"       # Purple
 
 # Configure Global variables
 ENV_CONF=${1:-env.conf}
-WAN_IP=$(dig @resolver1.opendns.com ANY myip.opendns.com +short)
+WAN_IP=$(dig -4 @resolver1.opendns.com ANY myip.opendns.com +short)
 
 
 ########################
@@ -133,7 +133,7 @@ power_state:
 EOF
 }
 
-function droplet_create {
+function droplet_create() {
 local   parms=(compute droplet create $DROPLET_HOSTNAME --wait --size $DROPLET_SIZE --image $DROPLET_IMAGE --region $DROPLET_REGION --ssh-keys $DROPLET_SSHKEY --tag-names $DROPLET_TAG)
 local	domain=${DROPLET_HOSTNAME#*.}
 local   host=${DROPLET_HOSTNAME%%.*}
@@ -175,7 +175,7 @@ done
 
 }
 
-function droplet_delete {
+function droplet_delete() {
 local droplet_id=""
 
 # Find and delete all Droplets with our tag
@@ -241,12 +241,24 @@ log "Attaching Firewall"
 firewall_attach && { log "Firewall installed successfully."; } || { log "Error installing Firewall!"; return 0; }; 
 
 log "Configuring SSH"
-droplet_sshBatch "$SCRIPT_CONFIG" "DROPLET_SSH_PORT=$DROPLET_SSH_PORT DROPLET_SSH_USER=$DROPLET_SSH_USER" "SSH_config"  && { log "SSH configured successfully."; } || { log "Error configuring SSH!"; return 0; }          
-
+droplet_sshBatch "$SCRIPT_CONFIG" "DROPLET_SSH_PORT=$DROPLET_SSH_PORT DROPLET_SSH_USER=$DROPLET_SSH_USER" "SSH_config"  && { log "SSH configured successfully."; } || { log "Error configuring SSH!"; return 0; }
+ssh-keygen -R "[$(dig -4 @resolver1.opendns.com ANY $DROPLET_HOSTNAME +short)]:$DROPLET_SSH_PORT"
 }
 
 
-function volume_attach {
+function droplet_backup() {
+#set -x
+
+backup_repokey="$(cat $BACKUP_REPOKEY)"
+backup_sshid="$(cat $BACKUP_SSHID)"
+
+log "Configuring Borgbackup"
+droplet_sshBatch "$SCRIPT_CONFIG" "MAILCOW_VOLUME=$MAILCOW_VOLUME MAILCOW_BACKUP_DIR=$MAILCOW_BACKUP_DIR BACKUP_REPO=$BACKUP_REPO BACKUP_REPOKEY=\"$backup_repokey\" BACKUP_HOSTID=\"$BACKUP_HOSTID\" BACKUP_SSHID=\"$backup_sshid\"" "Borg_install"  && { log "Borgbackup configured successfully."; } || { log "Error configuring Borgbackup!"; return 0; }
+
+
+}
+
+function volume_attach() {
 local droplet_id=""
 local volume_id=""
 
@@ -266,9 +278,11 @@ volume_id=$($DO_BIN compute volume list | grep "$MAILCOW_VOLUME" | awk '{ print 
 
 # Attach volume	
 if [ ! -z $droplet_id ] && [ ! -z $volume_id ]; then
-	log "Attaching Volume: $volume_id to Droplet: $droplet_id"
-	$DO_BIN compute volume-action attach $volume_id $droplet_id && log "Volume successfully attached" || { log "Problem attaching volume!"; return 1; }
 	
+	if [ "$($DO_BIN compute droplet list | grep "$DROPLET_TAG" | awk '{ print $14 }')" != "$volume_id" ]; then
+		log "Attaching Volume: $volume_id to Droplet: $droplet_id"
+		$DO_BIN compute volume-action attach $volume_id $droplet_id && log "Volume successfully attached" || { log "Problem attaching volume!"; return 1; }
+	fi	
 	# Workaround DO Bug in automount on Debian 9.6
 	droplet_sshBatch "$SCRIPT_CONFIG" "MAILCOW_VOLUME=$MAILCOW_VOLUME" "Volume_mount" && log "Volume successfully mounted" ||  { log "Problem creating mount!"; return 1; };
 else
@@ -279,7 +293,7 @@ fi
 }
 
 
-function volume_detach {
+function volume_detach() {
 local droplet_id=""
 local volume_id=""
 
@@ -334,8 +348,8 @@ local args=(compute ssh $DROPLET_HOSTNAME --ssh-port $DROPLET_SSH_PORT --ssh-use
 trap - SIGINT
 [[ ! -f ${1:-} ]] && log "Error: SSH batch file doesn't exist"
 [[ $# -eq 1 ]] && { $DO_BIN "${args[@]}" < $1 || { log "Error in SSH: $?"; trap ' ' SIGINT; return 0; } }
-[[ $# -eq 2 && ! -z ${2:-} ]] && { $DO_BIN "${args[@]}" < <(echo ${2:-}; cat $1) || { log "Error in SSH: $?"; trap ' ' SIGINT; return 0; } }
-[[ $# -eq 3 && ! -z ${3:-} ]] && { $DO_BIN "${args[@]}" < <(echo ${2:-}; cat $1; echo $3) || { log "Error in SSH: $?"; trap ' ' SIGINT; return 0; } }
+[[ $# -eq 2 && ! -z ${2:-} ]] && { $DO_BIN "${args[@]}" < <(echo "${2:-}"; cat $1) || { log "Error in SSH: $?"; trap ' ' SIGINT; return 0; } }
+[[ $# -eq 3 && ! -z ${3:-} ]] && { $DO_BIN "${args[@]}" < <(echo "${2:-}"; cat $1; echo $3) || { log "Error in SSH: $?"; trap ' ' SIGINT; return 0; } }
 trap ' ' SIGINT; 
 
 }
@@ -394,7 +408,8 @@ droplet_ssh "cd /opt/mailcow-dockerized/ && sudo docker-compose logs -f --tail=1
 
 function mailcow_backup() {
 log "Backing up mailcow config"
-droplet_ssh "sudo MAILCOW_BACKUP_LOCATION=$MAILCOW_BACKUP_DIR /opt/mailcow-dockerized/helper-scripts/backup_and_restore.sh backup all"
+#droplet_ssh "sudo MAILCOW_BACKUP_LOCATION=$MAILCOW_BACKUP_DIR /opt/mailcow-dockerized/helper-scripts/backup_and_restore.sh backup all"
+droplet_ssh "sudo MAILCOW_BACKUP_LOCATION=$MAILCOW_BACKUP_DIR /opt/mailcow-dockerized/helper-scripts/backup_and_restore.sh backup crypt redis rspamd postfix mysql"
 }
 
 function docker_prune() {
@@ -525,12 +540,14 @@ while [ "$choice" != x ]; do
         echo "1.  Create Droplet 		- Create and configure mailcow Droplet"
         echo "2.  Configure Droplet		- Configure and Secure Droplet"
         echo "3.  Install Mailcow 		- Create and configure mailcow Droplet"
+        echo "4.  Configure Backup 		- Configure mailcow backup"
         echo "x.  Exit"
         read -p "Enter choice [ 0 - 5 ] " choice
         case $choice in
 		1) droplet_create; pause ;;
                 2) droplet_configure; pause ;;
                 3) mailcow_install; pause ;;
+                4) droplet_backup; pause ;;
                 5) pause ;;
                 x) return 0;;
                 *) echo -e "${RED}Error...${STD}" && sleep 1
