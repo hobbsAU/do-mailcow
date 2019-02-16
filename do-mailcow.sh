@@ -13,7 +13,7 @@ trap '' SIGINT SIGQUIT SIGTSTP
 ########################
 
 # Set debug
-DEBUG=0
+DEBUG=1
 #set -x
 
 # Define command locations
@@ -88,6 +88,14 @@ function debug() {
 
 
 function generate_userdata() {
+#Set Authorized SSH Key
+if [[ -f "${DROPLET_SSH_PUBLIC_KEY_FILE}" ]]; then
+local authorized_ssh_key=$(< $DROPLET_SSH_PUBLIC_KEY_FILE)
+else
+    log "There is no ssh key file ${DROPLET_SSH_PUBLIC_KEY_FILE}"
+    pause
+fi
+
 cat <<EOF > $DROPLET_USERDATAFILE
 #cloud-config
 
@@ -99,7 +107,7 @@ package_upgrade: true
 
 # Install the following packages
 packages:
-  - ufw
+#  - ufw
   - haveged
 
 # Setup user
@@ -109,16 +117,15 @@ users:
     shell: /bin/bash
     sudo: ['ALL=(ALL) NOPASSWD:ALL']
     ssh-authorized-keys:
-      - $DROPLET_SSH_AUTHORIZEDKEY
+      - $authorized_ssh_key
 
 runcmd:
-  - echo "y" | ufw enable
-  - ufw rule allow proto tcp to 0.0.0.0/0 port $DROPLET_SSH_PORT 
-  - ufw default deny incoming
-  - ufw default allow outgoing
+#  - echo "y" | ufw enable
+#  - ufw rule allow proto tcp to 0.0.0.0/0 port $DROPLET_SSH_PORT 
+#  - ufw default deny incoming
+#  - ufw default allow outgoing
   - sed -i -e '/^#alias ll/s/^#//' /home/$DROPLET_SSH_USER/.bashrc
   - sed -i -e '/^#Port/s/^.*$/Port $DROPLET_SSH_PORT/' /etc/ssh/sshd_config
-#  - systemctl restart sshd
   - export HOSTNAME=\$(curl -s http://169.254.169.254/metadata/v1/hostname)
   - echo \$HOSTNAME
   - export PUBLIC_IPV4=\$(curl -s http://169.254.169.254/metadata/v1/interfaces/public/0/ipv4/address)
@@ -134,7 +141,7 @@ EOF
 }
 
 function droplet_create() {
-local   parms=(compute droplet create $DROPLET_HOSTNAME --wait --size $DROPLET_SIZE --image $DROPLET_IMAGE --region $DROPLET_REGION --ssh-keys $DROPLET_SSHKEY --tag-names $DROPLET_TAG)
+local   parms=(compute droplet create $DROPLET_HOSTNAME --wait --size $DROPLET_SIZE --image $DROPLET_IMAGE --region $DROPLET_REGION --tag-names $DROPLET_TAG)
 local	domain=${DROPLET_HOSTNAME#*.}
 local   host=${DROPLET_HOSTNAME%%.*}
 
@@ -144,34 +151,43 @@ generate_userdata
 #Check if droplet exists with same tag
 if [[ ! -z $($DO_BIN compute droplet list | grep "$DROPLET_TAG" | awk '{ print $1 }') ]]; then
 	log "ERROR: Droplet already exists";
-	return 0;
+else
+
+	#Create Droplet
+	log "Creating Droplet: $DROPLET_HOSTNAME in $DROPLET_REGION tagged with $DROPLET_TAG";
+	if [ ! -z "$DROPLET_MONITORING" ] && [ $DROPLET_MONITORING = "true" ] ; then
+		parms+=(--enable-monitoring)
+	fi
+
+	if [ ! -z "$DROPLET_USERDATAFILE" ]; then
+		parms+=(--user-data-file $DROPLET_USERDATAFILE)
+	fi
+
+	if [ $DEBUG -eq "1" ]; then
+		debug "$(printenv |grep DIGITAL)";
+	fi
+
+	$DO_BIN "${parms[@]}" && log "Droplet created." || { log "Error creating droplet!"; return 0; }
 fi
 
-#Create Droplet
-log "Creating Droplet: $DROPLET_HOSTNAME in $DROPLET_REGION tagged with $DROPLET_TAG";
-if [ ! -z "$DROPLET_MONITORING" ] && [ $DROPLET_MONITORING = "true" ] ; then
-	parms+=(--enable-monitoring)
-fi
-
-if [ ! -z "$DROPLET_USERDATAFILE" ]; then
-	parms+=(--user-data-file $DROPLET_USERDATAFILE)
-fi
-
+#Update DNS records
 if [ $DEBUG -eq "1" ]; then
-	debug "$(printenv |grep DIGITAL)";
+        debug "Updating DNS for Domain: $domain and Host: $host";
 fi
 
-$DO_BIN "${parms[@]}" && {
-log "Created Droplet, updating DNS..";
-$DO_BIN compute domain records update $domain --record-ttl 60 --record-name $host --record-id $($DO_BIN compute domain records list $domain |grep "$host " |awk '{ print $1 }') --record-data $($DO_BIN compute droplet list | grep "$DROPLET_TAG" | awk '{ print $3 }') || { log "Error updating DNS!"; return 0; };
-sleep 10
+$DO_BIN compute domain records update $domain --record-ttl 60 --record-name $host --record-id $($DO_BIN compute domain records list $domain |grep "$host " |awk '{ print $1 }') --record-data $($DO_BIN compute droplet list | grep "$DROPLET_TAG" | awk '{ print $3 }') && log "DNS updated." || { log "Error updating DNS!"; return 0; };
+
 
 # Wait for cloud-init to complete.
-until droplet_ssh 'last';  do
-clear && log "Waiting for Droplet SSH daemon.."
-sleep 10
-done
-} || { log "Error creating Droplet!"; return 0; }
+if [[ ! -z $($DO_BIN compute droplet list | grep "$DROPLET_TAG" | awk '{ print $1 }') ]]; then
+	until droplet_ssh 'last';  do
+	clear && log "Waiting for Droplet SSH daemon.."
+	sleep 10
+	done
+else
+	log "Error creating Droplet!"; 
+	return 0; 
+fi
 
 }
 
@@ -194,6 +210,8 @@ $DO_BIN compute droplet get "$1"
 function droplet_list() {
 log "Listing all Droplets.."
 $DO_BIN compute droplet list || { log "Error listing Droplets"; return 0; }
+log "Listing all Volumes.."
+$DO_BIN compute volume list || { log "Error listing Volumes"; return 0; }
 }
 
 function droplet_on() {
@@ -253,7 +271,7 @@ backup_repokey="$(cat $BACKUP_REPOKEY)"
 backup_sshid="$(cat $BACKUP_SSHID)"
 
 log "Configuring Borgbackup"
-droplet_sshBatch "$SCRIPT_CONFIG" "MAILCOW_VOLUME=$MAILCOW_VOLUME MAILCOW_BACKUP_DIR=$MAILCOW_BACKUP_DIR BACKUP_REPO=$BACKUP_REPO BACKUP_REPOKEY=\"$backup_repokey\" BACKUP_HOSTID=\"$BACKUP_HOSTID\" BACKUP_SSHID=\"$backup_sshid\"" "Borg_install"  && { log "Borgbackup configured successfully."; } || { log "Error configuring Borgbackup!"; return 0; }
+droplet_sshBatch "$SCRIPT_CONFIG" "MAILCOW_TZ=$MAILCOW_TZ MAILCOW_VOLUME=$MAILCOW_VOLUME MAILCOW_BACKUP_DIR=$MAILCOW_BACKUP_DIR BACKUP_REPO=$BACKUP_REPO BACKUP_REPOKEY=\"$backup_repokey\" BACKUP_HOSTID=\"$BACKUP_HOSTID\" BACKUP_SSHID=\"$backup_sshid\"" "Backup_install"  && { log "Borgbackup configured successfully."; } || { log "Error configuring Borgbackup!"; return 0; }
 
 
 }
@@ -322,7 +340,7 @@ $DO_BIN compute volume create $MAILCOW_VOLUME --fs-type ext4 --region $DROPLET_R
 
 # droplet_ssh "[command to execute]"
 function droplet_ssh() {
-local args=(compute ssh $DROPLET_HOSTNAME --ssh-port $DROPLET_SSH_PORT --ssh-user $DROPLET_SSH_USER --ssh-key-path $DROPLET_SSH_KEY_PATH)
+local args=(compute ssh $DROPLET_HOSTNAME --ssh-port $DROPLET_SSH_PORT --ssh-user $DROPLET_SSH_USER --ssh-key-path $DROPLET_SSH_PRIVATE_KEY_FILE)
 
 # Check for parameters to determine whether SSH or execute remote SSH command
 if [[ $# -eq 0 ]]; then
@@ -342,7 +360,7 @@ fi
 
 # Usage: droplet_sshBatch "<file>" "[environment]"
 function droplet_sshBatch() {
-local args=(compute ssh $DROPLET_HOSTNAME --ssh-port $DROPLET_SSH_PORT --ssh-user $DROPLET_SSH_USER --ssh-key-path $DROPLET_SSH_KEY_PATH --ssh-command "sudo bash -s" -- )
+local args=(compute ssh $DROPLET_HOSTNAME --ssh-port $DROPLET_SSH_PORT --ssh-user $DROPLET_SSH_USER --ssh-key-path $DROPLET_SSH_PRIVATE_KEY_FILE --ssh-command "sudo bash -s" -- )
 
 # Check for parameters and execute script
 trap - SIGINT

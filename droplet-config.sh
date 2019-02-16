@@ -159,17 +159,19 @@ MaxAuthTries 3
 PubkeyAuthentication yes
 AuthorizedKeysFile	.ssh/authorized_keys
 HostbasedAuthentication no
+X11Forwarding no
 IgnoreRhosts yes
 PasswordAuthentication no
 PermitEmptyPasswords no
 ChallengeResponseAuthentication no
 UsePrivilegeSeparation sandbox
+LogLevel VERBOSE
 AllowUsers $DROPLET_SSH_USER" | tee /etc/ssh/sshd_config
 systemctl restart sshd
 }
 
 
-function Borg_install() {
+function Backup_install() {
 ## systemd, pre_hook for mailcow backup
 
 # Load variable
@@ -179,11 +181,12 @@ CMPS_PRJ=$(echo $COMPOSE_PROJECT_NAME | tr -cd "[A-Za-z-_]")
 
 
 # install borgmatic
-docker pull monachus/borgmatic
+docker pull hobbsau/borgmatic
 
 # install systemd
 
 # add config directory
+[[ ! -d "/etc/borg" ]] && mkdir -p /etc/borg
 [[ ! -d "/etc/borgmatic" ]] && mkdir -p /etc/borgmatic
 [[ ! -d "~/.ssh" ]] && mkdir -p ~/.ssh
 
@@ -192,10 +195,8 @@ docker pull monachus/borgmatic
 [[ ! -f "/etc/borgmatic/config.yaml" ]] && echo "Copying borgmatic config" || echo "Overwriting borgmatic config"
 echo -e "location:
     source_directories:
-        - /vmail
-        - /mailcow
+        - /backup
 
-    one_file_system: true
     repositories:
         - $BACKUP_REPO
 
@@ -228,32 +229,105 @@ consistency:
 " | tee /etc/borgmatic/config.yaml
 
 # install repo key
-[[ ! -f "/etc/borgmatic/repokey" ]] && echo "Copying repo key" || echo "Overwriting repo key"
-echo -e "$BACKUP_REPOKEY" | tee /etc/borgmatic/repokey
-chmod 600 /etc/borgmatic/repokey
+[[ ! -f "/etc/borg/repokey" ]] && echo "Copying repo key" || echo "Overwriting repo key"
+echo -e "$BACKUP_REPOKEY" | tee /etc/borg/repokey
+chmod 600 /etc/borg/repokey
 
 #install ssh key
-[[ ! -f "~/.ssh/id_borg" ]] && echo "Copying ssh id" || echo "Overwriting ssh id"
-echo -e "$BACKUP_SSHID" | tee ~/.ssh/id_borg
-chmod 600 ~/.ssh/id_borg
+[[ ! -f "/root/.ssh/id_borg" ]] && echo "Copying ssh id" || echo "Overwriting ssh id"
+echo -e "$BACKUP_SSHID" | tee /root/.ssh/id_borg
+chmod 600 /root/.ssh/id_borg
 
 # install borg backup host keys and test
 local hostname="$(echo $BACKUP_HOSTID | awk '{ print $1 }')"
 local pubkey="$(echo $BACKUP_HOSTID | awk '{ print $3 }')"
-if [[ ! -f "~/.ssh/known_hosts" ]]; then
-ssh-keyscan -H $hostname | tee ~/.ssh/known_hosts
+if [[ ! -f "/root/.ssh/known_hosts" ]]; then
+ssh-keyscan -H $hostname | tee /root/.ssh/known_hosts
 else
-ssh-keyscan -H $hostname | tee -a ~/.ssh/known_hosts
+ssh-keyscan -H $hostname | tee -a /root/.ssh/known_hosts
 fi
 [[ $(ssh-keygen -F "$hostname" |grep "$pubkey") ]] && echo "Backup host authenticated" || { echo "Backup host authentication error"; exit 1; }
 
 
+# install borgmatic systemd script
+[[ ! -f "/etc/systemd/system/borgmatic.service" ]] && echo "Installing systemd borgmatic.service" || echo "Overwriting systemd borgmatic.service"
+echo -e " [Unit]
+Description=borg backup
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/docker run \
+  --rm -t --name hobbsau-borgmatic \
+  -e TZ=$MAILCOW_TZ \
+  -e BORG_PASSCOMMAND='cat /root/.config/borg/repokey' \
+  -e BORG_RSH='ssh -i /root/.ssh/id_borg' \
+  -v /etc/borg:/root/.config/borg \
+  -v /var/borgcache:/root/.cache/borg \
+  -v /etc/borgmatic:/root/.config/borgmatic:ro \
+  -v /root/.ssh:/root/.ssh \
+  -v $(docker volume ls -qf name=${CMPS_PRJ}_vmail-vol-1):/backup/vmail:ro \
+  -v $MAILCOW_BACKUP_DIR:/backup/mailcow:ro \
+  hobbsau/borgmatic --stats --verbosity 1
+
+" | tee /etc/systemd/system/borgmatic.service
+
+[[ ! -f "/etc/systemd/system/borgmatic.timer" ]] && echo "Installing systemd borgmatic.timer" || echo "Overwriting systemd borgmatic.timer"
+echo -e " [Unit]
+Description=Run borg backup
+
+[Timer]
+OnCalendar=*-*-* 23:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+" | tee /etc/systemd/system/borgmatic.timer
+
+
+
+# install mailcow backup systemd script
+[[ ! -f "/etc/systemd/system/mcbackup.service" ]] && echo "Installing systemd mcbackup.service" || echo "Overwriting systemd mcbackup.service"
+echo -e "[Unit]
+Description=mailcow backup
+
+[Service]
+Type=oneshot
+Environment=MAILCOW_BACKUP_LOCATION=$MAILCOW_BACKUP_DIR
+ExecStart=/opt/mailcow-dockerized/helper-scripts/backup_and_restore.sh backup crypt redis rspamd postfix mysql
+" | tee /etc/systemd/system/mcbackup.service
+
+
+[[ ! -f "/etc/systemd/system/mcbackup.timer" ]] && echo "Installing systemd mcbackup.timer" || echo "Overwriting systemd mcbackup.timer"
+echo -e " [Unit]
+Description=Run mcbackup
+
+[Timer]
+OnCalendar=*-*-* 22:50:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+" | tee /etc/systemd/system/mcbackup.timer
+
+# enable systemd services
+if [[ -f "/etc/systemd/system/borgmatic.service" ]] && [[ -f "/etc/systemd/system/mcbackup.service" ]]; then
+systemctl daemon-reload
+systemctl enable borgmatic.timer
+systemctl enable mcbackup.timer
+fi
+
+
 # execute a backup
-docker run --rm -e BORG_PASSCOMMAND='cat /borgmatic/repokey' -e BORG_RSH='ssh -i /root/.ssh/id_borg' -v $(docker volume ls -qf name=${CMPS_PRJ}_vmail-vol-1):/vmail:ro -v $MAILCOW_BACKUP_DIR:/mailcow -v ~/.ssh:/root/.ssh -v /etc/borgmatic:/borgmatic:ro monachus/borgmatic --verbosity 1 -c /borgmatic/config.yaml
+#systemctl start mcbackup.service
+#sleep 30
+#journalctl -u mcbackup.service
+#sleep 10
+#systemctl start borgmatic.service
+#docker run --rm -e BORG_PASSCOMMAND='cat /borgmatic/repokey' -e BORG_RSH='ssh -i /root/.ssh/id_borg' -v $(docker volume ls -qf name=${CMPS_PRJ}_vmail-vol-1):/vmail:ro -v $MAILCOW_BACKUP_DIR:/mailcow -v ~/.ssh:/root/.ssh -v /etc/borgmatic:/borgmatic:ro monachus/borgmatic --verbosity 1 -c /borgmatic/config.yaml
 
 # execute a test restore
-local archive="$(docker run --rm -e 'BORG_PASSCOMMAND=cat /borgmatic/repokey' -e 'BORG_RSH=ssh -i ~/.ssh/id_borg' -v ~/.ssh:/root/.ssh -v /etc/borgmatic:/borgmatic:ro monachus/borgmatic -c /borgmatic/config.yaml --list |tail -n 1 |awk '{ print $1 }')"
-docker run --rm -e 'BORG_PASSCOMMAND=cat /borgmatic/repokey' -e 'BORG_RSH=ssh -i ~/.ssh/id_borg' -v ~/.ssh:/root/.ssh -v /etc/borgmatic:/borgmatic:ro monachus/borgmatic borg extract --dry-run --list $BACKUP_REPO::$archive
+#local archive="$(docker run --rm -e 'BORG_PASSCOMMAND=cat /borgmatic/repokey' -e 'BORG_RSH=ssh -i ~/.ssh/id_borg' -v ~/.ssh:/root/.ssh -v /etc/borgmatic:/borgmatic:ro monachus/borgmatic -c /borgmatic/config.yaml --list |tail -n 1 |awk '{ print $1 }')"
+#docker run --rm -e 'BORG_PASSCOMMAND=cat /borgmatic/repokey' -e 'BORG_RSH=ssh -i ~/.ssh/id_borg' -v ~/.ssh:/root/.ssh -v /etc/borgmatic:/borgmatic:ro monachus/borgmatic borg extract --dry-run --list $BACKUP_REPO::$archive
 
 exit 0
 }
